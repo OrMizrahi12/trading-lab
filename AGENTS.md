@@ -17,13 +17,14 @@ Python 3.12 managed with [uv](https://docs.astral.sh/uv/). There is no linter or
 - Verify the environment: `uv run check_lab.py`
 - Run the offline tests (fake IB, no Gateway needed): `uv run pytest`
 - Update the bar cache (needs IB Gateway paper on port 4002): `uv run -m data_pipeline` (`--dry-run` shows the plan without connecting)
+- Check the cache for bad or missing data (offline): `uv run -m data_pipeline --quality`
 - Add a dependency: `uv add <pkg>` (updates `pyproject.toml` and `uv.lock`)
 
 ## Layout
 
 Top-level scripts (`market_data.py`, `scanner.py`, `orders.py`, ...) are one-off IB experiments. Each needs its own IB client ID: 1 `connect_test.py`, 2 `ibapi_hello.py`, 3 `market_data.py`, 4 `scanner.py`/`orders.py`, 5 `data_pipeline`.
 
-- `data_pipeline/`: incremental download of IB historical bars into a Parquet cache. One file per symbol and bar size (`data/cache/AAPL_5min.parquet`), UTC timestamps, columns `open, high, low, close, volume, average, barCount`. Regular trading hours, TRADES prices. Reuses `Throttle` from `market_data.py`. Read bars with `pd.read_parquet`.
+- `data_pipeline/`: incremental download of IB historical bars into a Parquet cache. One file per symbol and bar size (`data/cache/AAPL_5min.parquet`), UTC timestamps, columns `open, high, low, close, volume, average, barCount`. Regular trading hours, TRADES prices. Reuses `Throttle` from `market_data.py`. Read bars with `pd.read_parquet`. `data_pipeline/quality.py` checks each file against the NYSE calendar (`exchange_calendars`).
 - `tests/`: offline pytest tests.
 - `data/`: market data for research. Keep large or raw files out of Git (`data/cache/` is gitignored).
 - `strategies/`: strategy definitions and ideas.

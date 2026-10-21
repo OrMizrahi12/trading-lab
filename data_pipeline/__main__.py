@@ -1,9 +1,9 @@
-"""Update the Parquet bar cache: uv run -m data_pipeline [--symbols AAPL SPY] [--bar-sizes 5min 1min] [--dry-run]"""
+"""Update the Parquet bar cache: uv run -m data_pipeline [--symbols AAPL SPY] [--bar-sizes 5min 1min] [--dry-run | --quality]"""
 
 import argparse
 from datetime import datetime, timedelta, timezone
 
-from . import cache
+from . import cache, quality
 from .config import BAR_SIZES, SYMBOLS
 from .downloader import connect_paper, download_missing
 
@@ -28,7 +28,12 @@ def main():
     parser.add_argument("--symbols", nargs="+", default=SYMBOLS)
     parser.add_argument("--bar-sizes", nargs="+", default=list(BAR_SIZES), choices=list(BAR_SIZES))
     parser.add_argument("--dry-run", action="store_true", help="show the plan without connecting to IB")
+    parser.add_argument("--quality", action="store_true", help="check the cached files for bad or missing data (offline)")
     args = parser.parse_args()
+
+    if args.quality:
+        quality.run()
+        return
 
     if args.dry_run:
         dry_run(args.symbols, args.bar_sizes)
