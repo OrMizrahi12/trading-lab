@@ -14,6 +14,10 @@ def main() -> int:
     except json.JSONDecodeError:
         payload = {}
 
+    # Already blocked once this turn: let Claude stop so the hook can't loop forever.
+    if payload.get("stop_hook_active"):
+        return 0
+
     result = subprocess.run(
         ["git", "status", "--porcelain"],
         cwd=payload.get("cwd") or None,
