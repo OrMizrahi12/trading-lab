@@ -22,3 +22,4 @@ uv run check_lab.py
 ```
 
 This prints the Python version and today's date to confirm the environment works.
+Hooks in .claude/hooks guard the paper-only rule.
