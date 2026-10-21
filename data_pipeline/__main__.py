@@ -38,7 +38,8 @@ def main():
         for symbol in args.symbols:
             for bar_size in args.bar_sizes:
                 r = download_missing(ib, symbol, bar_size)
-                print(f"{r['path'].name}: +{r['added']} bars, cache {r['first']} -> {r['last']}")
+                span = "empty (no bars received)" if r["first"] is None else f"{r['first']} -> {r['last']}"
+                print(f"{r['path'].name}: +{r['added']} bars, cache {span}")
     finally:
         ib.disconnect()
 

@@ -29,8 +29,9 @@ def session_bars(step_minutes, first_day, last_day):
 
 
 class FakeIB:
-    def __init__(self, bar_times, errors=(), fail_after=None):
+    def __init__(self, bar_times, errors=(), fail_after=None, timeouts=0, clock=None):
         self.bar_times, self.errors, self.fail_after = bar_times, list(errors), fail_after
+        self.timeouts, self.clock = timeouts, clock  # a timeout = empty reply, no error, 60 s later
         self.errorEvent = Event()
         self.requests, self.sleeps = [], []
 
@@ -45,6 +46,10 @@ class FakeIB:
         self.requests.append(endDateTime)
         if self.fail_after is not None and len(self.requests) > self.fail_after:
             self.errorEvent.emit(1, 354, "Requested market data is not subscribed")
+            return []
+        if self.timeouts > 0:
+            self.timeouts -= 1
+            self.clock[0] += 60
             return []
         if self.errors:
             code, text = self.errors.pop(0)
@@ -127,6 +132,50 @@ def test_trading_day_seed_skips_weekend_without_retries(tmp_path, throttle):
     assert days == ["2026-10-15", "2026-10-16", "2026-10-19"]
     assert not [s for s in ib.sleeps if s >= 15]  # empty weekend chunks are not pacing errors
     assert len(ib.requests) <= 6
+
+
+def test_trading_day_seed_has_no_partial_oldest_session(tmp_path, throttle):
+    now = datetime(2026, 10, 21, 14, 0, tzinfo=UTC)  # Wednesday, 30 minutes after the open
+    ib = FakeIB(session_bars(1, datetime(2026, 10, 1).date(), now.date()))
+    run(ib, tmp_path, throttle, now, "1min")
+
+    df = cache.read(cache.cache_path("AAPL", "1min", tmp_path))
+    firsts = df.groupby(df.index.date).apply(lambda g: g.index.min().time())
+    assert list(firsts.index.astype(str)) == ["2026-10-19", "2026-10-20", "2026-10-21"]
+    assert set(firsts) == {time(13, 30)}  # every kept session starts at the open
+
+
+def test_timed_out_request_is_retried_not_cached_as_empty(tmp_path, throttle, monkeypatch):
+    clock = [0.0]
+    monkeypatch.setattr("data_pipeline.downloader.time.monotonic", lambda: clock[0])
+    now = datetime(2026, 10, 21, 18, 3, tzinfo=UTC)
+    ib = FakeIB(session_bars(5, datetime(2026, 8, 1).date(), now.date()), timeouts=1, clock=clock)
+    run(ib, tmp_path, throttle, now)
+    assert 15 in ib.sleeps  # backed off and asked again
+
+
+def test_persistent_timeout_raises_and_writes_nothing(tmp_path, throttle, monkeypatch):
+    clock = [0.0]
+    monkeypatch.setattr("data_pipeline.downloader.time.monotonic", lambda: clock[0])
+    now = datetime(2026, 10, 21, 18, 3, tzinfo=UTC)
+    ib = FakeIB([], timeouts=10, clock=clock)
+    with pytest.raises(RuntimeError, match="timed out"):
+        run(ib, tmp_path, throttle, now)
+    assert not cache.cache_path("AAPL", "5min", tmp_path).exists()
+
+
+def test_data_farm_drop_is_retried(tmp_path, throttle):
+    now = datetime(2026, 10, 21, 18, 3, tzinfo=UTC)
+    farm_down = (2105, "HMDS data farm connection is broken: ushmds")
+    ib = FakeIB(session_bars(5, datetime(2026, 8, 1).date(), now.date()), errors=[farm_down])
+    run(ib, tmp_path, throttle, now)
+    assert 15 in ib.sleeps
+
+
+def test_no_bars_at_all_reports_empty_cache(tmp_path, throttle):
+    now = datetime(2026, 10, 21, 18, 3, tzinfo=UTC)
+    result = run(FakeIB([]), tmp_path, throttle, now)
+    assert result["added"] == 0 and result["first"] is None and result["last"] is None
 
 
 def test_cache_rejects_naive_timestamps(tmp_path):

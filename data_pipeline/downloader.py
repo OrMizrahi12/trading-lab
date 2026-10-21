@@ -1,5 +1,6 @@
 """Incremental download of IB historical bars into the Parquet cache. Paper trading only."""
 
+import time
 from datetime import datetime, timedelta, timezone
 
 import pandas as pd
@@ -23,6 +24,7 @@ from .config import (
 )
 
 DELAYED = 3  # IB market data type: fall back to delayed data where live is not subscribed
+HIST_TIMEOUT = 60  # ib_async's default wait for a historical reply, in seconds
 
 
 class PacingError(RuntimeError):
@@ -32,33 +34,48 @@ class PacingError(RuntimeError):
 def connect_paper() -> IB:
     """Connect read-only to the paper Gateway and refuse anything but a DU (paper) account."""
     ib = IB()
-    ib.connect(HOST, PORT, clientId=CLIENT_ID, readonly=True)
-    accounts = ib.managedAccounts()
-    if not accounts or not all(a.startswith("DU") for a in accounts):
+    try:
+        ib.connect(HOST, PORT, clientId=CLIENT_ID, readonly=True)
+        accounts = ib.managedAccounts()
+        if not accounts or not all(a.startswith("DU") for a in accounts):
+            raise RuntimeError(f"Non-paper account(s): {accounts}")
+        ib.reqMarketDataType(DELAYED)
+    except BaseException:
         ib.disconnect()
-        raise RuntimeError(f"Non-paper account(s): {accounts}")
-    ib.reqMarketDataType(DELAYED)
+        raise
     return ib
 
 
+# Farm status messages that are only informational (connection OK / farm inactive but usable).
+INFORMATIONAL_CODES = {165, 2104, 2106, 2107, 2108, 2158}
+
+
 def _classify(errors):
-    """Return ("pacing"|"fatal"|None, message) for the IB messages seen during one request."""
+    """Return ("pacing"|"fatal"|"transient"|None, message) for the IB messages seen during one request.
+
+    pacing: asked too fast. transient: a data farm dropped mid-request (2103, 2105, 2110, 2157...),
+    so an empty or short answer cannot be trusted. fatal: anything else, e.g. no market data permission.
+    """
     for code, text in errors:
-        low = text.lower()
-        if code == 100 or "pacing violation" in low:
+        if code == 100 or "pacing violation" in text.lower():
             return "pacing", text
+    transient = None
     for code, text in errors:
-        low = text.lower()
-        informational = code == 165 or 2100 <= code < 2200  # farm status messages
-        if not informational and "no data" not in low:  # "HMDS query returned no data" = empty range
+        if code in INFORMATIONAL_CODES or "no data" in text.lower():  # "HMDS query returned no data" = empty range
+            continue
+        if 2100 <= code < 2200:
+            transient = transient or (f"IB message {code}: {text}")
+        else:
             return "fatal", f"IB error {code}: {text}"
-    return None, ""
+    return ("transient", transient) if transient else (None, "")
 
 
 def fetch_chunk(ib, contract, end, bar_size, throttle: Throttle = hist_throttle) -> pd.DataFrame:
-    """One historical request ending at `end` (tz-aware UTC). Retries on pacing errors.
+    """One historical request ending at `end` (tz-aware UTC). Retries on pacing errors and dropped farms.
 
     An empty frame means IB had no bars in that range (weekend, holiday); that is not an error.
+    A request that timed out is *not* an empty range: ib_async returns an empty list for it without
+    any error message, so a call that came back empty after the full timeout is retried, then raised.
     """
     spec = BAR_SIZES[bar_size]
     if end.tzinfo is None:
@@ -71,6 +88,7 @@ def fetch_chunk(ib, contract, end, bar_size, throttle: Throttle = hist_throttle)
         errors = []
         handler = lambda reqId, code, text, c=None: errors.append((code, text))  # noqa: E731
         ib.errorEvent += handler
+        started = time.monotonic()
         try:
             bars = ib.reqHistoricalData(
                 contract,
@@ -85,14 +103,17 @@ def fetch_chunk(ib, contract, end, bar_size, throttle: Throttle = hist_throttle)
             ib.errorEvent -= handler
 
         kind, message = _classify(errors)
-        if kind == "pacing":
+        if not bars and not errors and time.monotonic() - started >= HIST_TIMEOUT - 1:
+            kind, message = "transient", f"request timed out after {HIST_TIMEOUT}s with no reply"
+        if kind in ("pacing", "transient"):
             if attempt == len(RETRY_BACKOFF):
-                raise PacingError(f"{contract.symbol}: still pacing-limited after retries: {message}")
+                error = PacingError if kind == "pacing" else RuntimeError
+                raise error(f"{contract.symbol}: still failing after retries: {message}")
             wait = RETRY_BACKOFF[attempt]
-            print(f"    pacing error ({message}); waiting {wait}s then retrying")
+            print(f"    {kind} problem ({message}); waiting {wait}s then retrying")
             ib.sleep(wait)
             continue
-        if kind == "fatal" and not bars:
+        if kind == "fatal":  # even if some bars came back, the answer cannot be trusted
             raise RuntimeError(f"{contract.symbol}: {message}")
         if not bars:
             return pd.DataFrame()
@@ -141,7 +162,9 @@ def download_missing(
             if oldest < end:  # otherwise no progress: fall back to stepping a whole chunk
                 next_end = oldest
         end = next_end
-        if trading_days and len(sessions) >= trading_days:
+        # One session more than asked: the oldest one seen is usually cut off mid-day by the chunk
+        # boundary, so it is only a witness that the sessions after it are complete. It is dropped below.
+        if trading_days and len(sessions) >= trading_days + 1:
             break
 
     new = pd.concat(frames) if frames else pd.DataFrame()
@@ -153,8 +176,11 @@ def download_missing(
             keep = sorted(_session_dates(new.index))[-trading_days:]
             new = new[[d in keep for d in new.index.tz_convert(SESSION_TZ).date]]
 
-    before = 0 if last is None else len(cache.read(path))
+    old = cache.read(path)
+    before = 0 if old is None else len(old)
     if new.empty:
-        return {"path": path, "added": 0, "first": last, "last": last}
+        if old is None or old.empty:
+            return {"path": path, "added": 0, "first": None, "last": None}
+        return {"path": path, "added": 0, "first": old.index.min(), "last": old.index.max()}
     merged = cache.merge_and_write(path, new)
     return {"path": path, "added": len(merged) - before, "first": merged.index.min(), "last": merged.index.max()}
