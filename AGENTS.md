@@ -31,9 +31,10 @@ Top-level scripts (`market_data.py`, `scanner.py`, `orders.py`, ...) are one-off
 - `data/`: market data for research. Keep large or raw files out of Git (`data/cache/` is gitignored).
 - `strategies/specs/`: strategy spec YAMLs (`TEMPLATE.yaml` plus one per idea).
 - `backtests/`: backtest runs and results. `backtests/vectorized.py` is a simple vectorized EMA(20/50) backtester on SPY 5min (`uv run -m backtests.vectorized`), with look-ahead and cost variants for comparison; not yet the shared engine.
+- `backtests/engine.py`: the shared event-driven backtester (`uv run -m backtests.engine` runs `spy_vwap_reclaim` on SPY 5min). `run_backtest(bars, strategy)` feeds closed bars one at a time, fills at the next open, checks stop/target inside each bar via `check_bracket` (stop first, gaps fill at the open), models commission, spread (half per fill) and slippage (market-type fills only) with `CostModel`, and sizes each trade so a stop-out costs 1% of equity including costs. Positions are never held overnight (forced exit at the next open). Tests: `tests/test_engine.py`.
 - `notebooks/`: exploratory Jupyter notebooks.
 
-Update this file when a shared backtesting framework is introduced.
+
 
 ## Git
 
