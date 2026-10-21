@@ -1,0 +1,106 @@
+# Donchian breakout. Filled from strategies/specs/TEMPLATE.yaml.
+# Paper trading / backtesting only, never real orders. Nothing here is financial advice.
+# Times are exchange local time (America/New_York) unless stated otherwise.
+
+name: donchian_breakout
+version: 1
+description: >
+  Buy when the close breaks above the highest high of the previous 20 bars (a Donchian channel
+  is the highest high and lowest low of the last N bars). The bet is that a break out of the
+  recent range starts an intraday trend that keeps going until the close.
+
+market:
+  symbol: SPY             # Same code runs on QQQ: pass QQQ bars to the engine.
+  instrument: etf
+  direction: long
+
+timeframe:
+  bar_size: 5min
+  data_source: data/cache
+
+session:
+  timezone: America/New_York
+  start: "09:30"
+  end: "16:00"
+  skip_first_minutes: 15  # Signal bars start at 09:45 or later.
+  last_entry_time: "15:30"  # Measured as 30 minutes before the real NYSE close (13:30 on a half day). ASSUMPTION: same as spy_vwap_reclaim.
+  no_entry_window:        # Optional midday filter, off by default (params no_entry_from / no_entry_until). The comparison run sets 11:30 to 14:00.
+    from: null
+    until: null           # Window is [from, until) on the FILL time (the open after the signal bar closes), so 11:30 to 14:00 blocks signal bars starting 11:25 to 13:50. Exits and stops still work inside it.
+
+indicators:
+  - name: channel_high
+    type: highest_high
+    period: 20
+    source: high          # Previous 20 bars, NOT including the signal bar (else the close could never exceed it).
+  - name: channel_low
+    type: lowest_low
+    period: 20
+    source: low           # Last 20 bars including the signal bar.
+  - name: atr14
+    type: atr
+    period: 14            # ASSUMPTION: 14 is the standard ATR period.
+
+entry:
+  side: long
+  conditions:
+    - "signal bar start time >= 09:45 and < last_entry_time"
+    - "not inside the no-entry window (when one is set)"
+  trigger: "close > channel_high"  # Strictly greater: a close equal to the high is not a breakout.
+  fill: next_open
+  max_trades_per_day: null  # ASSUMPTION: no daily cap; the engine holds one position at a time.
+  max_open_positions: 1
+
+stop:
+  type: combined
+  fixed_pct: null
+  atr:
+    period: 14
+    multiple: 2.0
+  swing:
+    lookback_bars: 20     # Lowest low of the last 20 bars (the channel low).
+    buffer: 0.0
+  combine: cap            # Tighter (closer to entry) of the channel low and entry - 2 * ATR: stop = max(channel_low, entry - 2 * ATR).
+  trailing:
+    enabled: false
+    distance_atr: null
+  time_stop:
+    enabled: false
+    max_bars: null
+
+take_profit:
+  type: none              # No target: the position runs to the stop or the close (Entry.target = infinity).
+  r_multiple: null
+  fixed_pct: null
+  atr_multiple: null
+
+exit:
+  flatten_time: "15:55"   # Measured as 5 minutes before the real NYSE close (12:55 on a half day). Sell at the open of the 15:55 bar if still open.
+  exit_on_signal: []
+  priority: stop_first
+
+sizing:
+  method: risk_percent
+  risk_pct: 1.0           # Lose 1% of the account if the stop is hit (project default).
+  shares: null
+  dollars: null
+  starting_equity: 100000
+  max_position_pct: 100
+  allow_fractional: false
+
+filters:
+  min_atr: null
+  max_atr: null
+  min_volume: null
+  skip_dates: []
+  trend_filter: null
+
+costs:
+  commission_per_share: 0.01  # Engine CostModel defaults: 1c commission per side, 1c quoted spread (half per fill), 1c slippage on market fills.
+  slippage_per_share: 0.01
+
+notes: >
+  Assumptions I added beyond your idea: ATR period 14, no daily trade cap, history continuous
+  across days (the 20-bar channel and ATR may reach into yesterday's last bars), no entries in
+  the last 30 minutes, the 09:45 first signal. "Stop at the 20-bar low or 2 ATR" is read as the
+  tighter of the two. "Exit at the close" is read as a flatten 5 minutes before the real close.
