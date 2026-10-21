@@ -23,7 +23,7 @@ session:
   start: "09:30"
   end: "16:00"
   skip_first_minutes: 15  # Signal bars start at 09:45 or later (the 09:30, 09:35, 09:40 bars are skipped).
-  last_entry_time: "15:30"  # ASSUMPTION (not in the original idea): no new entries in the last 30 minutes, too little time to reach 2R.
+  last_entry_time: "15:30"  # Measured as 30 minutes before the real NYSE close (13:30 on a half day). ASSUMPTION (not in the original idea): no new entries in the last 30 minutes, too little time to reach 2R.
 
 indicators:
   - name: vwap
@@ -70,7 +70,7 @@ take_profit:
   atr_multiple: null
 
 exit:
-  flatten_time: "15:55"   # Sell at the open of the 15:55 bar if still open (5 minutes before the close).
+  flatten_time: "15:55"   # Measured as 5 minutes before the real NYSE close (12:55 on a half day). Sell at the open of the 15:55 bar if still open (5 minutes before the close).
   exit_on_signal: []
   priority: stop_first    # If one bar touches both stop and target, assume the stop hit first (conservative).
 

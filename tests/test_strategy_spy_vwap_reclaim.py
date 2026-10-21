@@ -139,3 +139,29 @@ def test_defaults_match_spec():
 def test_skips_when_signal_bar_low_is_under_the_capped_stop():
     # Reclaim bar opens at the deep dip's close, so its own wick sits below the ATR-capped stop.
     assert decide(make_bars([100.0] * 11 + [98.0, 100.3])) is None
+
+
+def make_half_day_bars(n_flat: int) -> pd.DataFrame:
+    """Same shape as make_bars, but today is 2025-11-28 (day after Thanksgiving): NYSE closes 13:00."""
+    yesterday = [100 + i / 30 for i in range(30)]
+    d1 = day_bars("2025-11-26", yesterday, yesterday[0])
+    return pd.concat([d1, day_bars("2025-11-28", pattern(n_flat), yesterday[-1])])
+
+
+def test_half_day_last_entry_is_30_minutes_before_the_1300_close():
+    # Reclaim bar starts 09:30 + 5*(n_flat+1) min.
+    assert isinstance(decide(make_half_day_bars(34)), Entry)  # starts 12:25, before 12:30
+    assert decide(make_half_day_bars(35)) is None  # starts 12:30, inside the last 30 minutes
+    # The same clock time on a normal day is fine: that close is 16:00.
+    assert isinstance(decide(make_bars(pattern(35))), Entry)
+
+
+def test_half_day_flattens_at_1255_not_1555():
+    bars = make_half_day_bars(40)  # last bar starts 13:05; walk back to the bars ending 12:50 / 12:55
+    pos = Position(pd.Timestamp("2025-11-28 15:00", tz="UTC"), 100.2, 99.6, 101.4)
+    ends_1255 = bars[bars.index.tz_convert(TZ) <= pd.Timestamp("2025-11-28 12:50", tz=TZ)]
+    assert isinstance(SpyVwapReclaim().on_bar(ends_1255, pos), Exit)  # bar 12:50-12:55
+    assert SpyVwapReclaim().on_bar(ends_1255.iloc[:-1], pos) is None  # bar 12:45-12:50
+    # Normal day, same clock time: still holding.
+    normal = make_bars(pattern(40))
+    assert SpyVwapReclaim().on_bar(normal, pos) is None

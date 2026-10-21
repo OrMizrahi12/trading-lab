@@ -11,6 +11,7 @@ education only. Nothing here is financial advice.
 from dataclasses import dataclass
 from datetime import time
 
+import exchange_calendars as xcals
 import pandas as pd
 
 import indicators
@@ -30,16 +31,28 @@ class SpyVwapReclaimParams:
     swing_buffer: float = 0.01
     r_multiple: float = 2.0
     first_signal: time = time(9, 45)  # session start 09:30 + skip_first_minutes 15
-    last_entry: time = time(15, 30)
-    flatten: time = time(15, 55)
+    # Measured from each day's real NYSE close (13:00 on a half day, not a fixed 16:00).
+    last_entry_minutes_before_close: int = 30
+    flatten_minutes_before_close: int = 5
     max_trades_per_day: int = 1
     timezone: str = indicators.SESSION_TZ
+    calendar: str = "XNYS"  # NYSE
 
 
 class SpyVwapReclaim(Strategy):
     def __init__(self, params: SpyVwapReclaimParams | None = None):
         self.p = params or SpyVwapReclaimParams()
+        self._cal = xcals.get_calendar(self.p.calendar)
+        self._closes: dict = {}  # session date -> real close (UTC), or None if not a session
         self.reset()
+
+    def _session_close(self, day) -> pd.Timestamp | None:
+        if day not in self._closes:
+            try:
+                self._closes[day] = self._cal.session_close(pd.Timestamp(day))
+            except xcals.errors.NotSessionError:
+                self._closes[day] = None
+        return self._closes[day]
 
     def reset(self) -> None:
         """Forget the per-day trade count. Call between independent runs."""
@@ -49,16 +62,21 @@ class SpyVwapReclaim(Strategy):
         p = self.p
         local = bars.index.tz_convert(p.timezone)
         start = local[-1]
-        # The decision is filled at the NEXT open, so to sell at the 15:55 open we
-        # must decide on the bar that closes at 15:55 (the one starting 15:50).
-        close_time = (start + pd.Timedelta(minutes=BAR_MINUTES)).time()
+        day = start.date()
+        session_close = self._session_close(day)
+        if session_close is None:  # data on a day the exchange was shut: do nothing
+            return Exit("time") if position is not None else None
+        # The decision is filled at the NEXT open, so to sell at the flatten time we
+        # must decide on the bar that closes then (the one starting 5 minutes earlier).
+        bar_end = start + pd.Timedelta(minutes=BAR_MINUTES)
+        flatten_at = session_close - pd.Timedelta(minutes=p.flatten_minutes_before_close)
+        last_entry = session_close - pd.Timedelta(minutes=p.last_entry_minutes_before_close)
 
         if position is not None:
-            return Exit("time") if close_time >= p.flatten else None
+            return Exit("time") if bar_end >= flatten_at else None
 
-        if not (p.first_signal <= start.time() < p.last_entry):
+        if not (p.first_signal <= start.time() and start < last_entry):
             return None
-        day = start.date()
         if len(bars) < 2 or self._entries.get(day, 0) >= p.max_trades_per_day:
             return None
 
