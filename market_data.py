@@ -83,6 +83,31 @@ def historical_bars(ib, contract, what_to_show, use_rth, label):
     return df
 
 
+def resample_bars(df, rule):
+    """Combine small bars into bigger ones. rule is a pandas offset such as "1min" or "15min".
+
+    A bigger bar is built from the smaller ones in its time window:
+    open = first open, high = max high, low = min low, close = last close, volume = sum.
+    """
+    return df.resample(rule).agg(
+        {"open": "first", "high": "max", "low": "min", "close": "last", "volume": "sum"}
+    ).dropna(subset=["open"])
+
+
+def resample_aapl_demo(rule="15min"):
+    """Offline: resample the saved AAPL 5-minute bars (no IB connection needed)."""
+    src = DATA_DIR / "AAPL_5min_TRADES.csv"
+    five = pd.read_csv(src, index_col="date", parse_dates=True)[["open", "high", "low", "close", "volume"]]
+    bigger = resample_bars(five, rule)
+    print(f"\n--- AAPL {len(five)} five-minute bars -> {len(bigger)} {rule} bars ---")
+    print("\n5-minute bars (first 6):")
+    print(five.head(6).to_string())
+    print(f"\n{rule} bars (first 2, each built from 3 rows above):")
+    print(bigger.head(2).to_string())
+    save_and_show(bigger, f"AAPL_{rule}_resampled")
+    return five, bigger
+
+
 def realtime_bars(ib, contract, seconds, label):
     """Collect 5-second real-time bars for `seconds`, then resample to 1-minute bars."""
     print(f"\n--- real-time 5-sec TRADES bars: {label}, listening {seconds}s ---")
@@ -97,18 +122,17 @@ def realtime_bars(ib, contract, seconds, label):
     ).set_index("time")
     save_and_show(df, f"{contract.symbol}_5sec_TRADES")
 
-    # A bigger bar is built from the smaller ones in its time window:
-    # open = first open, high = max high, low = min low, close = last close, volume = sum.
     # For 5-minute bars, change "1min" to "5min"; nothing else changes.
-    one_min = df.resample("1min").agg(
-        {"open": "first", "high": "max", "low": "min", "close": "last", "volume": "sum"}
-    ).dropna(subset=["open"])
+    one_min = resample_bars(df, "1min")
     print(f"\n    resampled {len(df)} five-second bars -> {len(one_min)} one-minute bars")
     save_and_show(one_min, f"{contract.symbol}_1min_resampled")
     return one_min
 
 
 def main():
+    if "--resample-aapl" in sys.argv:
+        resample_aapl_demo()
+        return
     ib = IB()
     ib.errorEvent += show_errors
     # readonly=True: the session can read data but cannot place orders.
