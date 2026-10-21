@@ -1,0 +1,93 @@
+"""
+Python TWS API Client
+
+Copyright (C) 2013-2026  Interactive Brokers LLC
+
+This program is free software: you can redistribute it and/or modify
+it under the terms of the GNU General Public License as published by
+the Free Software Foundation, either version 3 of the License, or
+(at your option) any later version.
+
+This program is distributed in the hope that it will be useful,
+but WITHOUT ANY WARRANTY; without even the implied warranty of
+MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
+GNU General Public License for more details.
+
+You should have received a copy of the GNU General Public License
+along with this program. If not, see <https://www.gnu.org/licenses/>.
+"""
+
+from ibapi.object_implem import Object
+from ibapi.const import UNSET_INTEGER, UNSET_DOUBLE
+
+
+class ScanData(Object):
+    def __init__(
+        self,
+        contract=None,
+        rank=0,
+        distance="",
+        benchmark="",
+        projection="",
+        legsStr="",
+        marketName="",
+    ):
+        self.contract = contract
+        self.rank = rank
+        self.distance = distance
+        self.benchmark = benchmark
+        self.projection = projection
+        self.legsStr = legsStr
+        self.marketName = marketName
+
+    def __str__(self):
+        return (
+            "Rank: %d, Symbol: %s, SecType: %s, Currency: %s, Distance: %s, Benchmark: %s, Projection: %s, Legs String: %s, MarketName: %s"
+            % (
+                self.rank,
+                self.contract.symbol,
+                self.contract.secType,
+                self.contract.currency,
+                self.distance,
+                self.benchmark,
+                self.projection,
+                self.legsStr,
+                self.marketName
+            )
+        )
+
+
+NO_ROW_NUMBER_SPECIFIED = -1
+
+
+class ScannerSubscription(Object):
+    def __init__(self):
+        self.numberOfRows = NO_ROW_NUMBER_SPECIFIED
+        self.instrument = ""
+        self.locationCode = ""
+        self.scanCode = ""
+        self.abovePrice = UNSET_DOUBLE
+        self.belowPrice = UNSET_DOUBLE
+        self.aboveVolume = UNSET_INTEGER
+        self.marketCapAbove = UNSET_DOUBLE
+        self.marketCapBelow = UNSET_DOUBLE
+        self.moodyRatingAbove = ""
+        self.moodyRatingBelow = ""
+        self.spRatingAbove = ""
+        self.spRatingBelow = ""
+        self.maturityDateAbove = ""
+        self.maturityDateBelow = ""
+        self.couponRateAbove = UNSET_DOUBLE
+        self.couponRateBelow = UNSET_DOUBLE
+        self.excludeConvertible = False
+        self.averageOptionVolumeAbove = UNSET_INTEGER
+        self.scannerSettingPairs = ""
+        self.stockTypeFilter = ""
+
+    def __str__(self):
+        s = "Instrument: %s, LocationCode: %s, ScanCode: %s" % (
+            self.instrument,
+            self.locationCode,
+            self.scanCode,
+        )
+        return s

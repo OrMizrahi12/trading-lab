@@ -6,4 +6,8 @@ readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
     "ib-async>=2.1.0",
+    "ibapi",
 ]
+
+[tool.uv.sources]
+ibapi = { path = "vendor/tws-api-python" }
