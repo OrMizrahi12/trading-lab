@@ -30,7 +30,7 @@ Top-level scripts (`market_data.py`, `scanner.py`, `orders.py`, ...) are one-off
 - `tests/`: offline pytest tests.
 - `data/`: market data for research. Keep large or raw files out of Git (`data/cache/` is gitignored).
 - `strategies/specs/`: strategy spec YAMLs (`TEMPLATE.yaml` plus one per idea).
-- `backtests/`: backtest runs and results.
+- `backtests/`: backtest runs and results. `backtests/vectorized.py` is a simple vectorized EMA(20/50) backtester on SPY 5min (`uv run -m backtests.vectorized`), with look-ahead and cost variants for comparison; not yet the shared engine.
 - `notebooks/`: exploratory Jupyter notebooks.
 
 Update this file when a shared backtesting framework is introduced.
