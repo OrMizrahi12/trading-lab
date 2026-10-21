@@ -21,3 +21,4 @@ venv/
 
 # Parquet bar cache (rebuild with: uv run -m data_pipeline)
 data/cache/
+reports/*.html
