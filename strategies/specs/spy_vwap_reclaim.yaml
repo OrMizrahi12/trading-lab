@@ -1,0 +1,101 @@
+# SPY VWAP reclaim. Filled from strategies/specs/TEMPLATE.yaml.
+# Paper trading / backtesting only, never real orders. Nothing here is financial advice.
+# Times are exchange local time (America/New_York) unless stated otherwise.
+
+name: spy_vwap_reclaim
+version: 1
+description: >
+  Buy SPY when price dips under VWAP (the day's volume-weighted average price) and then
+  closes back above it while the short-term trend (20-bar EMA, a fast-reacting average)
+  is still above VWAP. The bet is that an uptrend's dip to fair value gets bought.
+
+market:
+  symbol: SPY
+  instrument: etf
+  direction: long
+
+timeframe:
+  bar_size: 5min
+  data_source: data/cache
+
+session:
+  timezone: America/New_York
+  start: "09:30"
+  end: "16:00"
+  skip_first_minutes: 15  # Signal bars start at 09:45 or later (the 09:30, 09:35, 09:40 bars are skipped).
+  last_entry_time: "15:30"  # ASSUMPTION (not in the original idea): no new entries in the last 30 minutes, too little time to reach 2R.
+
+indicators:
+  - name: vwap
+    type: vwap            # Resets every session.
+  - name: ema20
+    type: ema
+    period: 20
+    source: close
+  - name: atr14
+    type: atr
+    period: 14            # ASSUMPTION: 14 is the standard ATR period.
+
+entry:
+  side: long
+  conditions:
+    - "ema20 > vwap on the signal bar"
+    - "signal bar start time >= 09:45 and < last_entry_time"
+  trigger: "previous close <= vwap and current close > vwap"  # One-bar cross, as chosen.
+  fill: next_open         # Signal is known at the bar close, so buy at the next bar's open.
+  max_trades_per_day: 1
+  max_open_positions: 1
+
+stop:
+  type: combined
+  fixed_pct: null
+  atr:
+    period: 14
+    multiple: 1.5
+  swing:
+    lookback_bars: 10     # ASSUMPTION: swing low = lowest low of the last 10 bars, including the signal bar.
+    buffer: 0.01          # ASSUMPTION: stop sits 1 cent under the swing low.
+  combine: cap            # Use the swing-low stop, but never risk more than 1.5 ATR (stop >= entry - 1.5 * ATR).
+  trailing:
+    enabled: false
+    distance_atr: null
+  time_stop:
+    enabled: false
+    max_bars: null
+
+take_profit:
+  type: r_multiple
+  r_multiple: 2.0         # Target = entry + 2 * (entry - stop). R is the dollars risked per share.
+  fixed_pct: null
+  atr_multiple: null
+
+exit:
+  flatten_time: "15:55"   # Sell at the open of the 15:55 bar if still open (5 minutes before the close).
+  exit_on_signal: []
+  priority: stop_first    # If one bar touches both stop and target, assume the stop hit first (conservative).
+
+sizing:
+  method: risk_percent
+  risk_pct: 1.0           # Lose 1% of the account if the stop is hit (project default).
+  shares: null
+  dollars: null
+  starting_equity: 100000
+  max_position_pct: 100   # Never hold more than 100% of equity (no leverage).
+  allow_fractional: false # Shares = floor(equity * 1% / (entry - stop)), then capped by max_position_pct.
+
+filters:
+  min_atr: null
+  max_atr: null
+  min_volume: null
+  skip_dates: []
+  trend_filter: null
+
+costs:
+  commission_per_share: 0.0  # Placeholder: set before trusting any result.
+  slippage_per_share: 0.0    # Placeholder: SPY is liquid, but 1 cent per share is a fair first guess.
+
+notes: >
+  Assumptions I added beyond your idea: ATR period 14, swing lookback 10 bars, 1-cent stop buffer,
+  no entries after 15:30, zero costs. Each is a tunable parameter, so change them here, not in code.
+  If the entry bar's own low is under the stop, or the stop is at or above the entry price
+  (can happen on a gap), skip the trade.

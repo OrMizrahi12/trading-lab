@@ -1,0 +1,87 @@
+# Strategy spec template. Copy to <strategy_name>.yaml and fill every field.
+# Paper trading / backtesting only, never real orders. Nothing here is financial advice.
+# Times are exchange local time (America/New_York) unless stated otherwise.
+
+name: ""                  # Short snake_case id, same as the file name.
+version: 1                # Bump when rules change, so old backtest results stay comparable.
+description: ""           # One or two plain-English sentences: what edge (repeatable advantage) is the idea chasing?
+
+market:
+  symbol: ""              # Ticker traded, e.g. SPY. Must match a file in data/cache/.
+  instrument: stock       # stock | etf | future. Only stock/etf are supported for now.
+  direction: long         # long (bet on a rise) | short (bet on a fall) | both.
+
+timeframe:
+  bar_size: 5min          # Candle length. Must match the cache file suffix, e.g. SPY_5min.parquet.
+  data_source: data/cache # Where bars are read from (Parquet files, UTC timestamps, regular hours only).
+
+session:
+  timezone: America/New_York  # Timezone used for every time value in this file.
+  start: "09:30"          # First bar of the regular session.
+  end: "16:00"            # Session close.
+  skip_first_minutes: 0   # Ignore signals during the opening N minutes (the open is choppy). 0 = trade from the open.
+  last_entry_time: "16:00"  # No new entries for bars starting at or after this time.
+
+indicators:               # Every indicator the rules below refer to, with its settings.
+  # - name: ema20         # Label used in the rules.
+  #   type: ema           # sma | ema | rsi | atr | bbands | vwap (see indicators.py).
+  #   period: 20          # Lookback in bars. VWAP has none: it resets every session.
+  #   source: close       # Price column the indicator is computed on.
+
+entry:
+  side: long              # Which direction this entry opens.
+  conditions: []          # Plain-English or expression list. ALL must be true on the signal bar.
+  trigger: ""             # The single event that fires the entry, e.g. "close crosses above X".
+  fill: next_open         # next_open (buy on the next bar's open, no look-ahead) | signal_close | stop_limit.
+  max_trades_per_day: 1   # Cap on entries per session.
+  max_open_positions: 1   # Positions held at the same time.
+
+stop:                     # Stop-loss: the price where you exit to cap the loss. Fill the type(s) you use.
+  type: fixed             # fixed | atr | swing | trailing | combined.
+  fixed_pct: null         # fixed: exit if price falls this % below entry, e.g. 0.5.
+  atr:
+    period: 14            # atr: bars used for ATR (average bar range).
+    multiple: null        # atr: stop = entry - multiple * ATR (long).
+  swing:
+    lookback_bars: null   # swing: stop goes under the lowest low of the last N bars.
+    buffer: 0.0           # swing: extra distance beyond the swing point, in dollars.
+  combine: null           # combined: tighter | wider | cap (use swing, but never risk more than the ATR stop).
+  trailing:
+    enabled: false        # trailing: the stop follows price up but never moves back down.
+    distance_atr: null    # trailing: distance behind the highest price since entry, in ATR.
+  time_stop:
+    enabled: false        # time: exit if the trade has not worked after N bars.
+    max_bars: null        # time: number of bars to hold at most.
+
+take_profit:
+  type: r_multiple        # r_multiple | fixed_pct | atr | none.
+  r_multiple: null        # r_multiple: target = entry + R * initial risk (R = entry minus stop distance).
+  fixed_pct: null         # fixed_pct: target % above entry.
+  atr_multiple: null      # atr: target distance in ATR.
+
+exit:
+  flatten_time: "15:55"   # Close any open position at the open of the bar starting at this time (flat before the close).
+  exit_on_signal: []      # Optional extra exit rules, e.g. "close below VWAP". Empty = only stop/target/time.
+  priority: stop_first    # If a bar touches both stop and target, assume stop_first (conservative) | target_first.
+
+sizing:
+  method: risk_percent    # risk_percent (size from the stop distance) | fixed_shares | fixed_dollars.
+  risk_pct: 1.0           # risk_percent: % of account lost if the stop is hit (project default: 1%).
+  shares: null            # fixed_shares: constant share count.
+  dollars: null           # fixed_dollars: constant position value.
+  starting_equity: 100000 # Paper account size used in backtests, in dollars.
+  max_position_pct: 100   # Cap on position value as % of equity (stops oversized trades on tight stops).
+  allow_fractional: false # Whether partial shares are allowed.
+
+filters:                  # Extra conditions that block trading on a given day or bar.
+  min_atr: null           # Skip if ATR is below this (market too quiet to reach the target).
+  max_atr: null           # Skip if ATR is above this (too wild).
+  min_volume: null        # Skip bars with volume under this.
+  skip_dates: []          # Dates to sit out, e.g. FOMC (Fed rate decision) days. ISO format.
+  trend_filter: null      # Optional higher-level rule, e.g. "close above 200-bar SMA".
+
+costs:
+  commission_per_share: 0.0  # Broker fee per share, in dollars.
+  slippage_per_share: 0.0    # Assumed worse-than-quoted fill per share, in dollars.
+
+notes: ""                 # Open questions, assumptions, things to test later.
