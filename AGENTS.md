@@ -12,21 +12,25 @@ Explain every trading term in plain English the first time you use it.
 
 ## Commands
 
-Python 3.12 managed with [uv](https://docs.astral.sh/uv/). There are no dependencies, tests, linter, or build step configured yet.
+Python 3.12 managed with [uv](https://docs.astral.sh/uv/). There is no linter or build step configured yet.
 
 - Verify the environment: `uv run check_lab.py`
+- Run the offline tests (fake IB, no Gateway needed): `uv run pytest`
+- Update the bar cache (needs IB Gateway paper on port 4002): `uv run -m data_pipeline` (`--dry-run` shows the plan without connecting)
 - Add a dependency: `uv add <pkg>` (updates `pyproject.toml` and `uv.lock`)
 
 ## Layout
 
-The repo is currently a scaffold. `data/`, `strategies/`, `backtests/` and `notebooks/` contain only `.gitkeep`; the only code is `check_lab.py`, a smoke test of the environment.
+Top-level scripts (`market_data.py`, `scanner.py`, `orders.py`, ...) are one-off IB experiments. Each needs its own IB client ID: 1 `connect_test.py`, 2 `ibapi_hello.py`, 3 `market_data.py`, 4 `scanner.py`/`orders.py`, 5 `data_pipeline`.
 
-- `data/`: market data for research. Keep large or raw files out of Git.
+- `data_pipeline/`: incremental download of IB historical bars into a Parquet cache. One file per symbol and bar size (`data/cache/AAPL_5min.parquet`), UTC timestamps, columns `open, high, low, close, volume, average, barCount`. Regular trading hours, TRADES prices. Reuses `Throttle` from `market_data.py`. Read bars with `pd.read_parquet`.
+- `tests/`: offline pytest tests.
+- `data/`: market data for research. Keep large or raw files out of Git (`data/cache/` is gitignored).
 - `strategies/`: strategy definitions and ideas.
 - `backtests/`: backtest runs and results.
 - `notebooks/`: exploratory Jupyter notebooks.
 
-No architecture exists beyond this folder split. Update this file when a shared backtesting framework or data format is introduced.
+Update this file when a shared backtesting framework is introduced.
 
 ## Git
 

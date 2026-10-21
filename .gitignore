@@ -18,3 +18,6 @@ venv/
 
 # Secrets
 .env
+
+# Parquet bar cache (rebuild with: uv run -m data_pipeline)
+data/cache/
