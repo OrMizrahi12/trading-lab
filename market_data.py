@@ -1,6 +1,7 @@
 """Qualify contracts, request snapshot quotes and bars from IB Gateway (paper). Paper trading only."""
 
 import sys
+import time
 from pathlib import Path
 
 import pandas as pd
@@ -18,6 +19,51 @@ DATA_DIR = Path(__file__).parent / "data"
 
 if PORT not in PAPER_PORTS:
     raise RuntimeError(f"Refusing to connect: port {PORT} is not a paper port")
+
+
+# IB pacing limits (pacing = IB rejects or disconnects clients that send requests too fast):
+HIST_MAX_PER_WINDOW = 60  # historical requests allowed per 10 minutes
+HIST_WINDOW = 600  # seconds
+HIST_SAME_REQUEST_GAP = 15  # seconds before an identical historical request may repeat
+MKT_DATA_LINES = 100  # default simultaneous market data lines (subscriptions)
+
+
+class Throttle:
+    """Sleeps just long enough to keep historical requests under IB's pacing limits.
+
+    Call wait(ib, key) right before each reqHistoricalData. `key` identifies the request
+    (contract, bar size, what-to-show, ...); repeating the same key is held for 15 seconds.
+    """
+
+    def __init__(self, max_calls=HIST_MAX_PER_WINDOW - 5, window=HIST_WINDOW, same_gap=HIST_SAME_REQUEST_GAP):
+        self.max_calls, self.window, self.same_gap = max_calls, window, same_gap  # 5-request safety margin
+        self.times = []  # send times of recent requests (monotonic seconds)
+        self.last_by_key = {}
+
+    def wait(self, ib, key=None):
+        now = time.monotonic()
+        self.times = [t for t in self.times if now - t < self.window]
+        delay = 0.0
+        if len(self.times) >= self.max_calls:
+            delay = max(delay, self.window - (now - self.times[0]))
+        if key in self.last_by_key:
+            delay = max(delay, self.same_gap - (now - self.last_by_key[key]))
+        if delay > 0:
+            print(f"    throttle: waiting {delay:.1f}s to respect IB pacing")
+            ib.sleep(delay)
+        now = time.monotonic()
+        self.times.append(now)
+        self.last_by_key[key] = now
+
+
+def check_line_room(ib, extra=1, limit=MKT_DATA_LINES):
+    """Raise before opening `extra` more market data lines if we would reach the limit."""
+    open_lines = len(ib.tickers())
+    if open_lines + extra > limit:
+        raise RuntimeError(f"{open_lines} market data lines open, +{extra} would exceed {limit}; cancel some first")
+
+
+hist_throttle = Throttle()
 
 
 def show_errors(reqId, errorCode, errorString, contract):
@@ -42,6 +88,7 @@ def snapshot(ib, contracts, market_data_type, label):
     ib.reqMarketDataType(market_data_type)
     for c in contracts:
         print(f"{c.symbol}{c.currency if c.secType == 'CASH' else ''}:")
+        check_line_room(ib)
         ticker = ib.reqMktData(c, genericTickList="", snapshot=True)
         ib.sleep(SNAPSHOT_WAIT)
         print(
@@ -66,6 +113,7 @@ def save_and_show(df, name):
 def historical_bars(ib, contract, what_to_show, use_rth, label):
     """Last 1 day of 5-minute bars. Returns a DataFrame, or None if IB sent nothing."""
     print(f"\n--- historical 5-min {what_to_show} bars: {label} ---")
+    hist_throttle.wait(ib, (contract.conId, what_to_show, use_rth))
     bars = ib.reqHistoricalData(
         contract,
         endDateTime="",  # empty = now
@@ -111,6 +159,7 @@ def resample_aapl_demo(rule="15min"):
 def realtime_bars(ib, contract, seconds, label):
     """Collect 5-second real-time bars for `seconds`, then resample to 1-minute bars."""
     print(f"\n--- real-time 5-sec TRADES bars: {label}, listening {seconds}s ---")
+    check_line_room(ib)
     bars = ib.reqRealTimeBars(contract, 5, "TRADES", useRTH=False)
     ib.sleep(seconds)
     ib.cancelRealTimeBars(bars)
