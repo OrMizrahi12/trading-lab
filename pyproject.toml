@@ -7,6 +7,7 @@ requires-python = ">=3.12"
 dependencies = [
     "ib-async>=2.1.0",
     "ibapi",
+    "pandas>=3.0.6",
 ]
 
 [tool.uv.sources]

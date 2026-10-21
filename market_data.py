@@ -1,6 +1,10 @@
-"""Qualify contracts and request snapshot quotes from IB Gateway (paper). Paper trading only."""
+"""Qualify contracts, request snapshot quotes and bars from IB Gateway (paper). Paper trading only."""
 
-from ib_async import IB, Forex, Stock
+import sys
+from pathlib import Path
+
+import pandas as pd
+from ib_async import IB, Forex, Stock, util
 
 HOST = "127.0.0.1"
 PORT = 4002  # IB Gateway paper port. Live ports are forbidden in this repo.
@@ -9,6 +13,8 @@ CLIENT_ID = 3  # Must be unique per connection to the Gateway.
 
 LIVE, DELAYED = 1, 3  # IB market data types
 SNAPSHOT_WAIT = 5  # seconds to wait for IB to answer each snapshot
+REALTIME_SECONDS = 65  # how long to listen for 5-second bars (about one minute)
+DATA_DIR = Path(__file__).parent / "data"
 
 if PORT not in PAPER_PORTS:
     raise RuntimeError(f"Refusing to connect: port {PORT} is not a paper port")
@@ -45,18 +51,85 @@ def snapshot(ib, contracts, market_data_type, label):
         ib.cancelMktData(c)
 
 
-ib = IB()
-ib.errorEvent += show_errors
-# readonly=True: the session can read data but cannot place orders.
-ib.connect(HOST, PORT, clientId=CLIENT_ID, readonly=True)
+def save_and_show(df, name):
+    """Write bars to data/<name>.csv and print the first and last rows."""
+    DATA_DIR.mkdir(exist_ok=True)
+    path = DATA_DIR / f"{name}.csv"
+    df.to_csv(path)
+    print(f"    saved {len(df)} rows -> {path.relative_to(path.parent.parent)}")
+    print(df.head(3).to_string())
+    if len(df) > 3:
+        print("    ...")
+        print(df.tail(2).to_string())
 
-try:
-    accounts = ib.managedAccounts()
-    if not all(a.startswith("DU") for a in accounts):
-        raise RuntimeError(f"Non-paper account(s): {accounts}")
 
-    contracts = qualify(ib)
-    snapshot(ib, contracts, LIVE, "live")
-    snapshot(ib, contracts, DELAYED, "delayed")
-finally:
-    ib.disconnect()
+def historical_bars(ib, contract, what_to_show, use_rth, label):
+    """Last 1 day of 5-minute bars. Returns a DataFrame, or None if IB sent nothing."""
+    print(f"\n--- historical 5-min {what_to_show} bars: {label} ---")
+    bars = ib.reqHistoricalData(
+        contract,
+        endDateTime="",  # empty = now
+        durationStr="1 D",
+        barSizeSetting="5 mins",
+        whatToShow=what_to_show,
+        useRTH=use_rth,  # True = regular trading hours only
+        formatDate=2,  # timestamps as UTC
+    )
+    if not bars:
+        print("    no bars returned")
+        return None
+    df = util.df(bars).set_index("date")
+    save_and_show(df, f"{contract.symbol}{contract.currency if contract.secType == 'CASH' else ''}_5min_{what_to_show}")
+    return df
+
+
+def realtime_bars(ib, contract, seconds, label):
+    """Collect 5-second real-time bars for `seconds`, then resample to 1-minute bars."""
+    print(f"\n--- real-time 5-sec TRADES bars: {label}, listening {seconds}s ---")
+    bars = ib.reqRealTimeBars(contract, 5, "TRADES", useRTH=False)
+    ib.sleep(seconds)
+    ib.cancelRealTimeBars(bars)
+    if not bars:
+        print("    no bars arrived")
+        return None
+    df = pd.DataFrame(
+        [{"time": b.time, "open": b.open_, "high": b.high, "low": b.low, "close": b.close, "volume": b.volume} for b in bars]
+    ).set_index("time")
+    save_and_show(df, f"{contract.symbol}_5sec_TRADES")
+
+    # A bigger bar is built from the smaller ones in its time window:
+    # open = first open, high = max high, low = min low, close = last close, volume = sum.
+    # For 5-minute bars, change "1min" to "5min"; nothing else changes.
+    one_min = df.resample("1min").agg(
+        {"open": "first", "high": "max", "low": "min", "close": "last", "volume": "sum"}
+    ).dropna(subset=["open"])
+    print(f"\n    resampled {len(df)} five-second bars -> {len(one_min)} one-minute bars")
+    save_and_show(one_min, f"{contract.symbol}_1min_resampled")
+    return one_min
+
+
+def main():
+    ib = IB()
+    ib.errorEvent += show_errors
+    # readonly=True: the session can read data but cannot place orders.
+    ib.connect(HOST, PORT, clientId=CLIENT_ID, readonly=True)
+    try:
+        accounts = ib.managedAccounts()
+        if not all(a.startswith("DU") for a in accounts):
+            raise RuntimeError(f"Non-paper account(s): {accounts}")
+
+        aapl, spy, eurusd = qualify(ib)
+        if "--snapshots" in sys.argv:
+            snapshot(ib, [aapl, spy, eurusd], LIVE, "live")
+            snapshot(ib, [aapl, spy, eurusd], DELAYED, "delayed")
+
+        ib.reqMarketDataType(DELAYED)  # fall back to delayed data where live is not subscribed
+        historical_bars(ib, aapl, "TRADES", True, "AAPL")
+        historical_bars(ib, eurusd, "MIDPOINT", False, "EURUSD")  # forex has no TRADES; it trades 24h
+        realtime_bars(ib, spy, REALTIME_SECONDS, "SPY")
+    finally:
+        ib.disconnect()
+
+
+if __name__ == "__main__":
+    main()
