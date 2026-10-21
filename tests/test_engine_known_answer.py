@@ -97,7 +97,8 @@ def test_trade_stopped_out(result):
     assert t["gross_pnl"] == pytest.approx(-952.00)
     assert t["costs"] == pytest.approx(47.60)
     assert t["net_pnl"] == pytest.approx(-999.60)
-    assert t["r_multiple"] == pytest.approx(-1.0)
+    assert t["stop_risk"] == pytest.approx(999.60)  # 952 shares x 1.05 a share
+    assert t["r_multiple"] == pytest.approx(-999.60 / 1000.00)  # 1R = 1% of the $100,000
 
 
 def test_trade_hits_target(result):
@@ -111,7 +112,9 @@ def test_trade_hits_target(result):
     assert t["gross_pnl"] == pytest.approx(1290.00)
     assert t["costs"] == pytest.approx(34.40)
     assert t["net_pnl"] == pytest.approx(1255.60)
-    assert t["r_multiple"] == pytest.approx(1255.60 / (860 * 1.15))
+    # 1R is 1% of the cash before the buy: 100,000 - 999.60 = 99,000.40 -> 990.004.
+    assert t["stop_risk"] == pytest.approx(860 * 1.15)
+    assert t["r_multiple"] == pytest.approx(1255.60 / 990.004)
 
 
 def test_equity_curve_and_final_equity(result):

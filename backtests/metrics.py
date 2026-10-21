@@ -48,8 +48,9 @@ METRICS = [
     Metric("win_rate", "Win rate", "pct",
            "The share of trades that finished with a profit after costs."),
     Metric("avg_r", "Average R", ".2f",
-           "The average trade result in R, where 1R is the amount risked if the stop is hit "
-           "(1% of equity here), so 0.2R means a 0.2% gain on the account per trade."),
+           "The average trade result in R, where 1R is a fixed 1% of equity at entry, so 0.2R "
+           "means a 0.2% gain on the account per trade. Tight stops can leave the real risk "
+           "under 1% (no leverage), so a stop-out can be less than -1R."),
     Metric("exposure", "Exposure", "pct",
            "The share of bars during which a position was open; the rest of the time you held cash."),
     Metric("trades", "Trades", ",d", "How many round trips (a buy followed by its sell) were made."),

@@ -84,6 +84,17 @@ def test_stop_out_costs_one_percent_of_equity():
     assert t["r_multiple"] == pytest.approx(-1)
 
 
+def test_tight_stop_is_capped_at_full_equity_and_loses_less_than_one_r():
+    # A 0.1 stop on a 100 stock would need 10,000 shares ($1M) for 1% risk; the no-leverage
+    # cap allows 1,000 shares ($100k), so the stop-out costs $100 = 0.1% of equity = -0.1R.
+    rows = [FLAT, FLAT, FLAT, (99.95, 99.96, 99.85, 99.9)]
+    t = run(rows, {1: Entry(stop=99.9, target=110)}).trades.iloc[0]
+    assert t["shares"] == 1000
+    assert t["stop_risk"] == pytest.approx(100)  # what the stop would really cost
+    assert t["net_pnl"] == pytest.approx(-100)
+    assert t["r_multiple"] == pytest.approx(-0.1)  # 1R stays a fixed 1% of equity = $1,000
+
+
 def test_stop_out_with_costs_is_still_about_one_percent():
     rows = [FLAT, FLAT, FLAT, (99.5, 99.6, 98.8, 99)]
     r = run(rows, {1: Entry(stop=99, target=110)}, costs=CostModel(0.01, 0.01, 0.01))

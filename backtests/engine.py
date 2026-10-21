@@ -12,7 +12,12 @@ strategy is written once and also works in the live paper trader. Rules:
   treated as the mid price; slippage (getting a slightly worse price than quoted)
   on market-type fills only (entry, stop, signal or time exit). A target is a
   limit order, so it pays spread but no slippage.
-- Size: shares are chosen so a stop-out loses `risk_pct` of equity, costs included.
+- Size: shares are chosen so a stop-out loses `risk_pct` of equity, costs included, but
+  never more than `max_position_pct` of equity (no leverage). When a stop is tight the cap
+  binds, the position is smaller than that, and a stop-out loses less than `risk_pct`.
+- R: a trade's `r_multiple` is net P&L over a FIXED `risk_pct` of equity at entry (so 1R is
+  always 1% of the account, even when the cap held the real risk lower). `stop_risk` is the
+  dollars a stop-out would really have cost.
 
 Run: uv run -m backtests.engine
 
@@ -90,7 +95,7 @@ def run_backtest(
     cash = float(equity)
     pos: Position | None = None
     shares = 0
-    entry_raw = risk_dollars = 0.0
+    entry_raw = risk_dollars = stop_risk = 0.0
     pending: Entry | Exit | None = None
     trades: list[dict] = []
     equity_curve = np.empty(n)
@@ -116,6 +121,7 @@ def run_backtest(
                 "gross_pnl": gross,
                 "costs": gross - net,
                 "net_pnl": net,
+                "stop_risk": stop_risk,
                 "r_multiple": net / risk_dollars,
             }
         )
@@ -139,7 +145,8 @@ def run_backtest(
                 qty = math.floor(cash * risk_pct / risk_ps)
                 qty = min(qty, math.floor(cash * max_position_pct / fill))
                 if qty > 0:
-                    shares, entry_raw, risk_dollars = qty, open_[i], qty * risk_ps
+                    shares, entry_raw, stop_risk = qty, open_[i], qty * risk_ps
+                    risk_dollars = cash * risk_pct  # fixed 1R, before the buy is paid for
                     cash -= shares * fill + shares * costs.commission_per_share
                     pos = Position(idx[i], fill, pending.stop, pending.target, 0)
         pending = None
