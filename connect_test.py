@@ -1,13 +1,13 @@
-"""Connect to TWS (paper) and print the account summary. Paper trading only."""
+"""Connect to IB Gateway (paper) and print the account summary. Paper trading only."""
 
 import argparse
 
 from ib_async import IB
 
 HOST = "127.0.0.1"
-PORT = 7497  # TWS paper port. Live (7496) is forbidden in this repo.
+PORT = 4002  # IB Gateway paper port. Live ports are forbidden in this repo.
 PAPER_PORTS = {7497, 4002}
-CLIENT_ID = 1  # Must be unique per connection to TWS.
+CLIENT_ID = 1  # Must be unique per connection to the Gateway.
 
 if PORT not in PAPER_PORTS:
     raise RuntimeError(f"Refusing to connect: port {PORT} is not a paper port")
