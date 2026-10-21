@@ -1,0 +1,7 @@
+[project]
+name = "trading-lab"
+version = "0.1.0"
+description = "Paper-trading-only educational lab for learning strategy research and backtesting."
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = []
