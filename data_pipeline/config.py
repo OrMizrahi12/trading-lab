@@ -37,3 +37,4 @@ BAR_SIZES = {
 MAX_TRADING_DAY_WALK = timedelta(days=10)  # cap for "N trading days" seeds (weekends, holidays)
 MIN_REQUEST_GAP = 0.5  # seconds between historical requests (IB limits bursts per contract)
 RETRY_BACKOFF = [15, 30, 60, 120]  # seconds to wait after each pacing error
+MAX_EMPTY_CHUNKS = 6  # backfill stops after this many empty chunks in a row (before the symbol existed, or no permission)

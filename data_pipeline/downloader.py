@@ -14,6 +14,7 @@ from .config import (
     CACHE_DIR,
     CLIENT_ID,
     HOST,
+    MAX_EMPTY_CHUNKS,
     MAX_TRADING_DAY_WALK,
     MIN_REQUEST_GAP,
     PORT,
@@ -184,3 +185,53 @@ def download_missing(
         return {"path": path, "added": 0, "first": old.index.min(), "last": old.index.max()}
     merged = cache.merge_and_write(path, new)
     return {"path": path, "added": len(merged) - before, "first": merged.index.min(), "last": merged.index.max()}
+
+
+def backfill(
+    ib, symbol, bar_size, target_start, cache_dir=CACHE_DIR, now=None, throttle: Throttle = hist_throttle, log=print
+) -> dict:
+    """Walk further back in time, one chunk per request, until the cache reaches `target_start`.
+
+    Starts at the oldest cached bar (or now, if there is no cache) and writes every chunk to the cache
+    as soon as it arrives. Each write extends the cache backwards with no hole, so if the run stops
+    (pacing error, lost connection, Ctrl-C) the same command resumes where it left off.
+    """
+    spec = BAR_SIZES[bar_size]
+    if target_start.tzinfo is None:
+        raise ValueError("target_start must be timezone-aware")
+    now = now or datetime.now(timezone.utc)
+    path = cache.cache_path(symbol, bar_size, cache_dir)
+    old = cache.read(path)
+    end = now if old is None or old.empty else old.index.min().to_pydatetime()
+    added, requests, empty_run = 0, 0, 0
+
+    contract = Stock(symbol, "SMART", "USD")
+    ib.qualifyContracts(contract)
+
+    while end > target_start:
+        df = fetch_chunk(ib, contract, end, bar_size, throttle)
+        requests += 1
+        next_end = end - spec.chunk_length
+        if df.empty:
+            empty_run += 1
+            if empty_run >= MAX_EMPTY_CHUNKS:
+                log(f"    {symbol}: {empty_run} empty chunks in a row before {end:%Y-%m-%d}; no earlier data, stopping")
+                break
+        else:
+            empty_run = 0
+            oldest = df.index.min().to_pydatetime()
+            new = df[(df.index >= target_start) & (df.index + spec.length <= now)]
+            if not new.empty:
+                before = len(cache.read(path)) if path.exists() else 0
+                added += len(cache.merge_and_write(path, new)) - before
+            if oldest < end:
+                next_end = oldest
+            if oldest <= target_start:
+                end = target_start
+                break
+        end = next_end
+        log(f"    {symbol} {bar_size}: reached {end:%Y-%m-%d}, +{added} bars so far")
+
+    merged = cache.read(path)
+    first, last = (None, None) if merged is None or merged.empty else (merged.index.min(), merged.index.max())
+    return {"path": path, "added": added, "requests": requests, "first": first, "last": last}

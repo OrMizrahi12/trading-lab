@@ -8,7 +8,7 @@ from ib_async import BarData, Event
 
 from data_pipeline import cache
 from data_pipeline.config import BAR_SIZES
-from data_pipeline.downloader import PacingError, download_missing
+from data_pipeline.downloader import PacingError, backfill, download_missing
 from market_data import Throttle
 
 PACING = (162, "Historical Market Data Service error message: Historical data request pacing violation")
@@ -186,3 +186,62 @@ def test_cache_rejects_naive_timestamps(tmp_path):
 
 def test_bar_sizes_cover_chunks():
     assert BAR_SIZES["5min"].chunk_duration == "1 W" and BAR_SIZES["1min"].chunk_duration == "1 D"
+
+
+def run_backfill(ib, tmp_path, throttle, now, days):
+    return backfill(
+        ib, "AAPL", "5min", now - timedelta(days=days), cache_dir=tmp_path, now=now, throttle=throttle, log=lambda *_: None
+    )
+
+
+def test_backfill_walks_back_to_target_with_no_gaps(tmp_path, throttle):
+    now = datetime(2026, 10, 21, 18, 3, tzinfo=UTC)
+    all_bars = session_bars(5, datetime(2025, 1, 1).date(), now.date())
+    r = run_backfill(FakeIB(all_bars), tmp_path, throttle, now, days=120)
+
+    df = cache.read(cache.cache_path("AAPL", "5min", tmp_path))
+    target = now - timedelta(days=120)
+    expected = [t for t in all_bars if target <= t and t + timedelta(minutes=5) <= now]
+    assert list(df.index) == expected  # every bar once, sorted, none missing, none older than the target
+    assert r["added"] == len(expected) and r["first"] == df.index.min()
+
+
+def test_backfill_resumes_after_failure_and_matches_one_clean_run(tmp_path, throttle):
+    now = datetime(2026, 10, 21, 18, 3, tzinfo=UTC)
+    all_bars = session_bars(5, datetime(2025, 1, 1).date(), now.date())
+    with pytest.raises(RuntimeError, match="354"):
+        run_backfill(FakeIB(all_bars, fail_after=4), tmp_path, throttle, now, days=120)
+    path = cache.cache_path("AAPL", "5min", tmp_path)
+    partial = cache.read(path)
+    assert 0 < len(partial) and partial.index.min() > now - timedelta(days=120)  # progress was saved
+
+    ib = FakeIB(all_bars)
+    run_backfill(ib, tmp_path, throttle, now, days=120)
+    assert ib.requests[0] == partial.index.min()  # resumed from the oldest cached bar, not from now
+    clean = tmp_path / "clean"
+    run_backfill(FakeIB(all_bars), clean, throttle, now, days=120)
+    pd.testing.assert_frame_equal(cache.read(path), cache.read(cache.cache_path("AAPL", "5min", clean)))
+
+
+def test_backfill_when_target_already_reached_makes_no_requests(tmp_path, throttle):
+    now = datetime(2026, 10, 21, 18, 3, tzinfo=UTC)
+    all_bars = session_bars(5, datetime(2025, 1, 1).date(), now.date())
+    run_backfill(FakeIB(all_bars), tmp_path, throttle, now, days=60)
+    ib = FakeIB(all_bars)
+    r = run_backfill(ib, tmp_path, throttle, now, days=30)
+    assert ib.requests == [] and r["added"] == 0
+
+
+def test_backfill_stops_when_symbol_has_no_earlier_data(tmp_path, throttle):
+    now = datetime(2026, 10, 21, 18, 3, tzinfo=UTC)
+    ib = FakeIB(session_bars(5, datetime(2026, 9, 1).date(), now.date()))
+    r = run_backfill(ib, tmp_path, throttle, now, days=700)
+    assert r["requests"] < 20  # gave up after a run of empty chunks instead of asking for two years of nothing
+    assert r["first"] is not None and r["first"] >= datetime(2026, 9, 1, tzinfo=UTC)
+
+
+def test_backfill_retries_pacing_error(tmp_path, throttle):
+    now = datetime(2026, 10, 21, 18, 3, tzinfo=UTC)
+    ib = FakeIB(session_bars(5, datetime(2026, 5, 1).date(), now.date()), errors=[PACING])
+    run_backfill(ib, tmp_path, throttle, now, days=30)
+    assert 15 in ib.sleeps
