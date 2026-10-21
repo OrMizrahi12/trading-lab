@@ -1,3 +1,14 @@
 {
-  "disableClaudeAiConnectors": true
+  "disableClaudeAiConnectors": true,
+  "permissions": {
+    "deny": [
+      "Read(./.env)",
+      "Edit(./.env)",
+      "Bash(git push --force:*)",
+      "Bash(git push -f:*)"
+    ],
+    "ask": [
+      "Bash(rm:*)"
+    ]
+  }
 }
