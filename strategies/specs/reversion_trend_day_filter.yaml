@@ -76,8 +76,8 @@ costs:
 
 notes: >
   Pre-registered before any result: threshold 5.0 ATR, chosen from the distribution of the baseline
-  entries' distance from the open alone (no profit figures): the 2/3 quantile was 4.7 to 5.3 ATR on
-  SPY and QQQ, so 5.0 stands aside on roughly the top third of entries, matching the top-third
+  entries' distance from the open alone (no profit figures): the 2/3 quantile was 4.7 to 5.6 ATR on
+  SPY and QQQ (both strategies), so 5.0 stands aside on roughly the top third to two-fifths of entries, matching the top-third
   "trend day" label of reports/reversion_by_day_type. Absolute distance, so it also blocks entries
   after a big rise. Distance is not scaled for time of day (a later bar has had more time to travel).
   Not used: a 14-session average daily range, because the engine only shows a strategy the last 200
