@@ -10,6 +10,7 @@ from ib_async import IB
 
 from .config import CLIENT_ID, HOST, PAPER_PORTS, PORT
 from .refs import owns
+from .risk import Risk
 
 log = logging.getLogger("live")
 
@@ -50,10 +51,11 @@ def connect_paper(ib_factory=IB, host: str = HOST, port: int = PORT, client_id: 
 class Broker:
     """The only way the engine places or cancels orders."""
 
-    def __init__(self, ib, tag: str, dry_run: bool = False, host: str = HOST, port: int = PORT):
+    def __init__(self, ib, tag: str, dry_run: bool = False, host: str = HOST, port: int = PORT, risk: Risk | None = None):
         self.ib = ib
         self.tag = tag  # orderRef put on every order, so reconcile can tell ours from anyone else's
         self.dry_run = dry_run
+        self.risk = risk  # the limits outside the strategy; None only in tests and tools that must not be blocked
         self._host, self._port = host, port
         self.sent = 0  # orders this process sent to IB (a modify counts too); the proof prints it
 
@@ -68,11 +70,17 @@ class Broker:
         if ref is not None and not owns(self.tag, ref):
             raise ValueError(f"orderRef {ref!r} does not belong to {self.tag!r}")
         order.orderRef = ref or order.orderRef or self.tag
+        self.check_risk(contract, order)
         if self.dry_run:
             log.info("DRY RUN: would place %s %s %s", order.action, order.totalQuantity, contract.symbol)
             return None
         self.sent += 1
         return self.ib.placeOrder(contract, order)
+
+    def check_risk(self, contract, order) -> None:
+        """Raise RiskRefused if the limits forbid this order (buys only; sells and cancels always pass)."""
+        if self.risk is not None:
+            self.risk.check(self.ib, contract, order)
 
     def cancel(self, order):
         if not self.ib.isConnected():

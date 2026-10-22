@@ -1,0 +1,13 @@
+# Risk limits for the live paper engine. Read by live/risk.py; checked in Broker before EVERY order leaves the program,
+# whatever the strategy asks for. Paper trading only.
+#
+# The paper account is about $1,000,000. Sizing at 1% risk per trade would allow positions of hundreds of
+# thousands of dollars (1% of $1M = $10,000 at risk; with a 1% stop that is a $1,000,000 position). These limits
+# are deliberately far below that: a position is capped at about 0.8% of the account.
+#
+# A symbol that is not listed here cannot be bought at all. Sells and cancels are never refused.
+symbols:
+  SPY: {max_shares: 10, max_position_value: 8000}   # dollars, measured at the order's limit price
+  QQQ: {max_shares: 10, max_position_value: 8000}
+max_trades_per_day: 4       # entries (distinct entry refs) bought or resting at IB today, all symbols
+daily_loss_limit: 500       # dollars: no new buys once net liquidation is this far under the day's first reading

@@ -32,6 +32,7 @@ from .execution import DuplicateEntry, ExecutionHalt, Executor, utc_now
 from .feed import BarFeed
 from .reconcile import ib_shares, open_orders
 from .refs import entry_ref, order_label, owns
+from .risk import Risk, RiskRefused
 from .state import PositionState, lock, run_dir
 
 NAME = "proof_entry"
@@ -56,8 +57,13 @@ def describe(trade) -> str:
     return f"{order_label(o)} {o.action} {o.orderType} {o.totalQuantity} @ {price} {o.tif}{parent} [{trade.orderStatus.status}] ref {o.orderRef}"
 
 
-def prove(ib, *, symbol: str = "SPY", price, clock=utc_now, out=print, executor: Executor | None = None) -> int:
-    """Run the proof once. `price()` gives the reference price. Returns the exit code: 0 proven, 1 failed, 2 refused."""
+def prove(ib, *, symbol: str = "SPY", price, clock=utc_now, out=print, executor: Executor | None = None,
+          risk: Risk | None = None, name: str = NAME, keep: bool = False) -> int:
+    """Run the proof once. `price()` gives the reference price. Returns the exit code: 0 proven, 1 failed, 2 refused.
+
+    `keep` leaves the share and its resting stop and target open (for demonstrating the kill switch); `name` changes
+    the ref namespace, so a second demo the same day is a different entry.
+    """
     contract = Stock(symbol, "SMART", "USD")
     ib.qualifyContracts(contract)
     accounts = check_paper(ib)
@@ -67,9 +73,9 @@ def prove(ib, *, symbol: str = "SPY", price, clock=utc_now, out=print, executor:
     if hours is None or not hours[0] <= now < hours[1] - pd.Timedelta(minutes=FLATTEN_BEFORE_CLOSE_MIN):
         out("refused   : the market is closed (or about to close). Run it during the regular session, 09:30-16:00 ET.")
         return 2
-    tag = f"live:{NAME}:{symbol}"
+    tag = f"live:{name}:{symbol}"
     ref = entry_ref(tag, hours[0])  # the session's opening bar: one ref per day, however often the command runs
-    ex = executor or Executor(ib, Broker(ib, tag), contract, clock=clock)
+    ex = executor or Executor(ib, Broker(ib, tag, risk=risk), contract, clock=clock)
     broker = ex.broker
     out(f"entry ref : {ref}")
 
@@ -89,6 +95,9 @@ def prove(ib, *, symbol: str = "SPY", price, clock=utc_now, out=print, executor:
         for line in dup.found:
             out(f"            - {line}")
         return finish(ib, broker, symbol, out, expect_sent=0)
+    except RiskRefused as e:
+        out(f"RISK REFUSED: {e.reason}. Nothing was sent.")
+        return 2
     except ExecutionHalt as e:
         out(f"HALT      : {e}. Check IB by hand: {symbol} may be open.")
         return 1
@@ -101,6 +110,10 @@ def prove(ib, *, symbol: str = "SPY", price, clock=utc_now, out=print, executor:
     for t in ib.trades():
         if t.order.orderRef == ref:
             out(f"            {describe(t)}")
+    if keep:
+        ib.sleep(1)
+        out(f"left open : {symbol} long {ib_shares(ib, symbol)} with its stop and target resting at IB (on purpose, --keep)")
+        return 0 if entered.protected else 1
     pos = PositionState(shares=f.shares, entry_time=f.time.isoformat(), entry_price=f.price, stop=stop, target=target,
                         stop_order_id=entered.stop_order_id, target_order_id=entered.target_order_id)
     for _ in range(20):  # IB's position report trails the fill by a moment; the exit sells only what it sees
@@ -140,8 +153,10 @@ def setup_logging(directory) -> None:
 def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--symbol", default="SPY")
+    ap.add_argument("--keep", action="store_true", help="leave the share open with its stop and target (kill switch demo)")
+    ap.add_argument("--name", default=NAME, help="ref namespace; use another name for a second entry the same day")
     args = ap.parse_args()
-    setup_logging(run_dir(NAME, args.symbol, STATE_DIR))
+    setup_logging(run_dir(args.name, args.symbol, STATE_DIR))
     ib = None
     try:
         ib = connect_paper()
@@ -155,8 +170,8 @@ def main() -> None:
                 raise SystemExit("no bars from IB: cannot take a reference price")
             return float(closed["close"].iloc[-1])
 
-        with lock(run_dir(NAME, args.symbol, STATE_DIR)):
-            code = prove(ib, symbol=args.symbol, price=price)
+        with lock(run_dir(args.name, args.symbol, STATE_DIR)):
+            code = prove(ib, symbol=args.symbol, price=price, risk=Risk.from_file(), name=args.name, keep=args.keep)
     except PaperGuardError as e:
         print(f"refused   : {e}")
         code = 2

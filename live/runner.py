@@ -31,8 +31,9 @@ from .execution import DuplicateEntry, ExecutionHalt, Executor, utc_now
 from .feed import BAR, NY, BarFeed
 from .reconcile import ib_shares, reconcile
 from .refs import entry_ref, owns
+from .risk import Risk, RiskRefused, stop_path
 from .registry import build
-from .state import LiveState, PositionState, load, lock, run_dir, save, settings_key
+from .state import LiveState, PositionState, StopFileError, load, lock, run_dir, save, settings_key
 from .step import step, window
 
 log = logging.getLogger("live")
@@ -44,11 +45,11 @@ class Runner:
                  wall_clock_rules: bool = True, catch_up: int = 0, flatten_on_mismatch: bool = False,
                  clear_halt: bool = False, hole_wait_min: int = HOLE_WAIT_MIN,
                  max_signal_age_min: int = MAX_SIGNAL_AGE_MIN, flatten_before_close_min: int = FLATTEN_BEFORE_CLOSE_MIN,
-                 lookback: int = LOOKBACK_BARS, contract=None):
+                 lookback: int = LOOKBACK_BARS, contract=None, risk: Risk | None = None):
         self.ib, self.name, self.symbol, self.dry_run, self.clock = ib, name, symbol, dry_run, clock
         self.contract = contract or Stock(symbol, "SMART", "USD")
         self.tag = f"live:{name}:{symbol}"
-        self.broker = Broker(ib, self.tag, dry_run=dry_run)
+        self.broker = Broker(ib, self.tag, dry_run=dry_run, risk=risk)
         self.dir = run_dir(name, symbol, root)
         self.state_path = self.dir / ("state_dryrun.json" if dry_run else "state.json")
         self.key = settings_key(name, symbol, settings)
@@ -65,11 +66,15 @@ class Runner:
         self.lookback = lookback
         self.sessions = SessionClock()
         self.state: LiveState | None = None
+        self.stop_file = stop_path(root)
+        self.stopped = False  # the STOP file was seen: nothing more is done until it is removed
 
     # -- start ---------------------------------------------------------------------------
 
     def start(self) -> None:
         """Load the state, compare it with IB, and refuse to trade if anything is unexplained."""
+        if self.stop_file.exists():
+            raise StopFileError(f"{self.stop_file} exists (kill switch): not starting. Remove it to allow trading again.")
         self.ib.qualifyContracts(self.contract)
         accounts = check_paper(self.ib)
         say(f"account   : {', '.join(accounts)}  paper account (every account starts with DU), "
@@ -154,7 +159,21 @@ class Runner:
 
     # -- one poll ------------------------------------------------------------------------
 
+    def _stop_seen(self) -> bool:
+        """The STOP file stops all trading, at once and without a halt: removing the file is enough to resume."""
+        if not self.stop_file.exists():
+            return False
+        if not self.stopped:
+            self.stopped = True
+            log.error("STOP file %s found: no more trading", self.stop_file)
+            say(f"STOP      : {self.stop_file} exists (kill switch). Nothing more will be traded; the runner exits. "
+                "Remove the file to allow trading again.")
+            self._save()
+        return True
+
     def tick(self) -> None:
+        if self._stop_seen():
+            return
         if self.state.halted:
             log.error("halted, not trading: %s", self.state.halted)
             return
@@ -268,7 +287,7 @@ class Runner:
             shares = 0 if blocked else self.executor.size(intent, ref)
             record["shares"] = shares
             if blocked or shares == 0:
-                record["action"] = f"skipped: {blocked or 'size 0 (stop not below the price)'}"
+                record["action"] = f"skipped: {blocked or 'size 0 (stop not below the price, or no room under the risk limits)'}"
                 self._append("signals.jsonl", record)
                 log.info("signal %s entry skipped: %s", ts, record["action"])
                 return f"ENTRY signal ({intent.reason}, stop {intent.stop:.2f}) -> {record['action']}"
@@ -277,6 +296,12 @@ class Runner:
                 entered = self.executor.enter(
                     order_ref, shares, ref, intent.stop, record["target"], known_refs=st.sent_refs,
                     before_send=lambda: self._write_ahead(order_ref, shares, intent, record["target"], ts, bar_close))
+            except RiskRefused as refused:  # already logged by the risk gate; the signal is skipped, nothing halts
+                st.pending_entry = None
+                record["action"] = f"skipped: risk: {refused.reason}"
+                self._append("signals.jsonl", record)
+                self._save()
+                return f"ENTRY signal ({intent.reason}, stop {intent.stop:.2f}) -> REFUSED by the risk limits: {refused.reason}"
             except DuplicateEntry as dup:
                 record["action"] = f"skipped: already sent ({order_ref})"
                 self._append("signals.jsonl", record)
@@ -408,9 +433,13 @@ class Runner:
                 self.start()
                 while True:
                     self.tick()
-                    if once or self.state.halted:
+                    if once or self.state.halted or self.stopped:
                         break
                     self.ib.sleep(POLL_SECONDS)
+            except StopFileError as e:
+                self.stopped = True
+                log.error("%s", e)
+                say(f"STOP      : {e}")
             except KeyboardInterrupt:
                 self._interrupted()
 

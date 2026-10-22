@@ -10,7 +10,9 @@ import sys
 
 from .broker import connect_paper
 from .config import STATE_DIR
+from .kill import main_precheck
 from .registry import STRATEGIES, parse_settings
+from .risk import Risk
 from .runner import Runner
 from .state import run_dir
 
@@ -50,13 +52,22 @@ def main() -> None:
     if args.catch_up and not args.dry_run:
         ap.error("--catch-up is for --dry-run only: a real run never trades on history")
 
+    stopped = main_precheck(STATE_DIR)
+    if stopped:  # before anything connects
+        print(stopped)
+        sys.exit(3)
+    try:
+        risk = Risk.from_file()  # live/risk_limits.yaml; a missing or malformed file stops the run, no defaults
+    except (OSError, ValueError) as e:
+        print(f"risk limits: {e}")
+        sys.exit(2)
     settings = parse_settings(args.settings)
     setup_logging(run_dir(args.strategy, args.symbol, STATE_DIR))
     ib = None
     try:
         ib = connect_paper()  # refuses a non-paper port, a remote host or any account not starting with DU
         Runner(ib, args.strategy, args.symbol, settings, dry_run=args.dry_run, catch_up=args.catch_up,
-               flatten_on_mismatch=args.flatten_on_mismatch, clear_halt=args.clear_halt).run(once=args.once)
+               flatten_on_mismatch=args.flatten_on_mismatch, clear_halt=args.clear_halt, risk=risk).run(once=args.once)
     except KeyboardInterrupt:  # Ctrl+C while connecting; Runner.run handles it once running
         print("\nCtrl+C: stopped before the engine started. Nothing was traded.")
         sys.exit(130)

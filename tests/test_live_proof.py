@@ -114,3 +114,23 @@ def test_library_log_lines_go_to_the_file_not_the_console(tmp_path, capsys):
     assert shown.out == "" and shown.err == ""
     log = (tmp_path / "events.log").read_text()
     assert "Market data farm connection is OK" in log and "something worth keeping" in log
+
+
+def test_keep_leaves_one_share_with_its_resting_stop_and_target():
+    ib = paper()
+    code, text = run(ib, name="kill_demo", keep=True)
+    assert code == 0 and "left open" in text
+    assert ib.holdings["SPY"] == 1 and sorted(t.order.orderType for t in ib.openTrades()) == ["LMT", "STP"]
+    assert {t.order.orderRef for t in ib.openTrades()} == {f"live:kill_demo:SPY:{DAY1}:0930"}
+
+
+def test_the_proof_goes_through_the_risk_limits_and_the_stop_file(tmp_path):
+    from live.risk import Risk, load_limits, stop_path
+    risk = Risk(load_limits("symbols: {SPY: {max_shares: 10, max_position_value: 8000}}\nmax_trades_per_day: 4\n"
+                            "daily_loss_limit: 500"), root=tmp_path)
+    ib = paper()
+    stop_path(tmp_path).write_text("kill switch")
+    code, text = run(ib, risk=risk)
+    assert code == 2 and "RISK REFUSED" in text and "STOP" in text and ib.placed == []
+    stop_path(tmp_path).unlink()
+    assert run(ib, risk=risk)[0] == 0  # one share is inside the limits

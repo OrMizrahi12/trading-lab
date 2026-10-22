@@ -21,6 +21,10 @@ class StateError(RuntimeError):
     """The state file cannot be used (wrong settings, locked by another runner, unknown version)."""
 
 
+class StopFileError(RuntimeError):
+    """The STOP file exists (the kill switch was used): the runner does not start or keep running."""
+
+
 def settings_key(strategy: str, symbol: str, settings: dict) -> str:
     """Short stable id of one (strategy, symbol, settings) combination."""
     text = f"{strategy}|{symbol}|{sorted((k, repr(v)) for k, v in settings.items())}"

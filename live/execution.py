@@ -22,6 +22,7 @@ from .broker import Broker
 from .config import EXIT_MAX_REPRICES, LIMIT_OFFSET_PCT, ORDER_TIMEOUT_S
 from .reconcile import ib_shares
 from .refs import evidence, owns
+from .risk import net_liquidation
 from .state import PositionState
 
 log = logging.getLogger("live")
@@ -65,15 +66,6 @@ def utc_now() -> pd.Timestamp:
     return pd.Timestamp.now(tz="UTC")
 
 
-def net_liquidation(ib) -> float:
-    """The first managed (paper) account's total value, cash plus positions, in dollars."""
-    account = ib.managedAccounts()[0]
-    for row in ib.accountSummary(account):
-        if row.tag == "NetLiquidation" and row.currency in ("USD", "BASE") and row.account == account:
-            return float(row.value)
-    raise RuntimeError("IB did not report NetLiquidation")
-
-
 class Executor:
     def __init__(self, ib, broker: Broker, contract, *, timeout_s: float = ORDER_TIMEOUT_S,
                  offset_pct: float = LIMIT_OFFSET_PCT, max_reprices: int = EXIT_MAX_REPRICES,
@@ -101,7 +93,10 @@ class Executor:
         equity = net_liquidation(self.ib)
         qty = self.sizer.shares(equity=equity, fill=fill, risk_per_share=risk_ps,
                                 entry_time=self.clock(), trades=[])
-        return max(0, min(qty, math.floor(equity / fill)))
+        qty = max(0, min(qty, math.floor(equity / fill)))
+        if self.broker.risk is not None:  # a million dollar account would size far past the risk limits
+            qty = self.broker.risk.cap_shares(self.ib, self.contract.symbol, qty, round(ref_price * (1 + self.offset_pct), 2))
+        return qty
 
     # -- marketable limits ---------------------------------------------------------------
 
@@ -163,11 +158,12 @@ class Executor:
             found.append("the state file says it was sent")
         if found:
             raise DuplicateEntry(order_ref, found, in_ib)
+        has_target = target is not None
+        parent = LimitOrder("BUY", shares, self._limit("BUY", ref_price), tif="DAY", transmit=False)
+        self.broker.check_risk(self.contract, parent)  # a refusal comes before the intent is written down
         if before_send is not None:
             before_send()
 
-        has_target = target is not None
-        parent = LimitOrder("BUY", shares, self._limit("BUY", ref_price), tif="DAY", transmit=False)
         children = [StopOrder("SELL", shares, round(stop, 2), tif="GTC", transmit=not has_target)]  # GTC: survives a dead runner
         if has_target:
             children.append(LimitOrder("SELL", shares, round(target, 2), tif="GTC", transmit=True))  # last one sends all
@@ -265,7 +261,7 @@ class Executor:
 
     # -- exit ----------------------------------------------------------------------------
 
-    def exit(self, pos: PositionState, ref: float) -> Fill | None:
+    def exit(self, pos: PositionState, ref: float, restore_protection: bool = True) -> Fill | None:
         """Sell `pos.shares`. Stop and target are cancelled first; the sell is re-priced wider if it stalls.
 
         Never sells more than IB holds minus what the stop/target already sold. Returns None if nothing was left
@@ -290,6 +286,7 @@ class Executor:
                 log.warning("exec: %d %s still unsold after attempt %d", left, symbol, attempt + 1)
         if left > 0:
             pos.shares = left
-            self.protect(pos)
+            if restore_protection:
+                self.protect(pos)
             raise ExecutionHalt(f"could not sell {left} {symbol} after {self.max_reprices + 1} attempts")
         return Fill(sold, proceeds / sold, self.clock()) if sold else None
