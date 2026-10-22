@@ -65,7 +65,8 @@ class Spec:
 
 STRATEGIES = {
     "opening_range_breakout": Spec(OpeningRangeBreakout, OpeningRangeBreakoutParams,
-                                   {"range_minutes": (5, 60, 5), "target_r": (0.5, 10.0, None)}),
+                                   {"range_minutes": (5, 60, 5), "target_r": (0.5, 10.0, None),
+                                    "max_hold_bars": (3, 36, 1)}),
     "donchian_breakout": Spec(DonchianBreakout, DonchianBreakoutParams,
                               {"channel_bars": (10, 60, 5), "atr_multiple": (1.0, 4.0, None)}),
     "bollinger_rsi_reversion": Spec(BollingerRsiReversion, BollingerRsiReversionParams,

@@ -192,3 +192,26 @@ def test_engine_failed_breakout_is_stopped_at_the_range_low_and_not_bought_again
     assert t["net_pnl"].iloc[0] < 0
     # Stop 99.8, sold with half the 1c spread and 1c slippage taken off the stop price.
     assert t["exit_price"].iloc[0] == pytest.approx(99.8 - 0.005 - 0.01)
+
+
+def test_max_hold_bars_exits_after_that_many_bars_and_never_changes_the_default():
+    orb = OpeningRangeBreakout(OpeningRangeBreakoutParams(range_minutes=5, max_hold_bars=6))
+    bars = today_bars([100.0] * 20)
+    held_n = lambda n: Position(pd.Timestamp("2026-03-03 15:00", tz="UTC"), 100.0, 99.0, float("inf"), n)
+    assert orb.on_bar(bars, held_n(5)) is None
+    assert orb.on_bar(bars, held_n(6)) == Exit("max_hold")
+    assert ORB5.on_bar(bars, held_n(500)) is None  # default: no time exit
+    with pytest.raises(ValueError):
+        OpeningRangeBreakoutParams(max_hold_bars=0)
+
+
+def test_engine_run_without_max_hold_bars_is_unchanged_and_with_it_sells_after_n_bars():
+    climb = [100.5 + 0.1 * i for i in range(1, 68)]
+    day = synthetic_day(climb)
+    base = run_backtest(day, OpeningRangeBreakout()).trades
+    same = run_backtest(day, OpeningRangeBreakout(OpeningRangeBreakoutParams(max_hold_bars=None))).trades
+    pd.testing.assert_frame_equal(base, same)
+    t = run_backtest(day, OpeningRangeBreakout(OpeningRangeBreakoutParams(max_hold_bars=6))).trades
+    assert list(t["reason"]) == ["max_hold"]
+    held = pd.Timestamp(t["exit_time"].iloc[0]) - pd.Timestamp(t["entry_time"].iloc[0])
+    assert held == pd.Timedelta(minutes=30)  # 6 bars
