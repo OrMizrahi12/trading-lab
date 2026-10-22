@@ -33,3 +33,4 @@ research/batch_logs/
 
 # Leaderboard daily-return cache (research/leaderboard.py)
 research/leaderboard_cache/
+data/live/
