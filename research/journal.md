@@ -1,0 +1,75 @@
+# Research journal
+
+Paper trading only, educational use only. Nothing here is financial advice.
+
+A running list of intraday strategy ideas for SPY and QQQ 5-minute bars. Update the **Status** and **Result** columns as we test; add new rows at the bottom of the table and re-rank.
+
+Last updated: 2026-10-22.
+
+## Plain-English terms used below
+
+- **Sharpe ratio**: return per unit of ups and downs. Around 1 is decent, above 2 is rare and should make us suspicious.
+- **R**: the amount risked on one trade (entry price minus stop price). A "1R target" means taking profit once the trade has made as much as the stop would have lost.
+- **Out-of-sample**: data the strategy's settings were never tuned on. The only honest test.
+- **Overfitting**: picking settings that fit past noise, so they fall apart on new data.
+- **Look-ahead (hindsight)**: using information that was not known yet at the time of the trade. A filter that uses it cannot be traded.
+- **Gamma hedging**: option sellers (market makers) buy when prices rise and sell when they fall to stay neutral. That can push prices further in the same direction.
+- **Gap**: the difference between yesterday's close and today's open.
+- **Overnight vs. intraday return**: close-to-open vs. open-to-close.
+
+## What the lab found in modules 7 and 8
+
+I read module 7 as the optimization work (grid, Optuna, split validation, walk-forward) and module 8 as the stress and luck work (Monte Carlo, cost sweep, noise, regimes, day types). Numbers are from running the scripts on 2026-10-22. **Data is only two years (2024-10-21 to 2026-10-21, about 500 sessions)**, so everything below is thin evidence.
+
+| Finding | Number | Where from |
+|---|---|---|
+| ORB QQQ 15 min / 1R is the best cell of the grid | Sharpe 1.77, but its 8 neighbours average 1.06 | `backtests.optimize` |
+| Targets from 3R to 10R and "none" give almost the same Sharpe | the far targets are rarely or never hit; only 1R and 2R change the result | `backtests.optimize` |
+| Tuning to validation to holdout, best cell | Sharpe 2.91, then 0.53, then 0.85 | `backtests.split_validation` |
+| The "smoothed plateau" pick did not rescue it | holdout Sharpe -0.60 | `backtests.split_validation` |
+| ORB survives parameter noise | 200 of 200 noisy versions make money, median Sharpe 1.39 | `reports.orb_noise_regimes` |
+| ORB survives costs | break-even at 9x usual costs; Sharpe 0.90 at 5x | `reports.orb_stress_test` |
+| ORB is not tied to a market regime | average R per trade 0.05 to 0.08 in rising, falling, calm and wild months alike | `reports.orb_noise_regimes` |
+| Reversion strategies lose on trend days and win on other days | profit factor 0.43 to 0.68 on trend days vs. 1.18 to 1.71 on other days (SPY and QQQ) | `reports.reversion_by_day_type` |
+| Stop-out rate of reversion on trend days | 48% to 66% vs. 35% to 41% on other days | `reports.reversion_by_day_type` |
+
+Plain reading: the ORB signal looks real but small (average trade about 0.06 R), and the headline Sharpe of 1.77 is flattered by picking the best cell. The honest figure is closer to 1.
+
+## The table
+
+**Promise** and **Cheap** are scored 1 to 5 (5 = most promising / cheapest to test). **Score** = Promise x Cheap. Cheap means: how much new code and data work it takes with what the lab already has (engine, 5-minute SPY and QQQ cache, scorecard). A high score means "do this first", not "this will work".
+
+Sources marked * I could only confirm through search summaries and secondary write-ups, not by reading the paper itself. Check the paper before leaning on its numbers.
+
+| # | Idea | Why it might work | Source | How we would test it | Promise | Cheap | Score | Status | Result |
+|---|---|---|---|---|---|---|---|---|---|
+| H1 | **Skip reversion on likely trend days (own hypothesis)**. Add a filter using only information known at the time (e.g. the first-hour move vs. the 14-day average, or price already more than X ATR from the open) that switches `bollinger_rsi_reversion` and `vwap_stretch_reversion` off. | Module 8 showed both strategies lose money on trend days (profit factor 0.43 to 0.68) and make money on the rest. The trend-day label used hindsight; the open question is whether a live-knowable version captures it. | Own: `reports.reversion_by_day_type`. Related idea: the noise area in B below. | Add an optional filter param to the two reversion strategies (like `no_entry_from`). Re-run `backtests.reversion_comparison` and `reports.reversion_by_day_type`, then the scorecard. Count the extra settings as trials for the Deflated Sharpe. | 4 | 5 | **20** | not started | |
+| H2 | **Is the ORB edge a quick bounce? Try time-based exits (own hypothesis)**. Replace the 1R target with "exit N bars after entry" (e.g. 6, 12, 24 bars) and compare. | Only 1R and 2R beat "no target"; 3R to 10R equal it. That suggests the profit is made in the first part of the move and then fades. A time exit might get the same gain without a hand-picked R, which means fewer tunable settings and less overfitting. | Own: `backtests.optimize` grid. | Add an optional `max_hold_bars` to `opening_range_breakout`. Run a small grid (3 values) next to 1R on QQQ and SPY. Judge by plateau, not peak, and by validation and holdout, not tuning. | 3 | 5 | **15** | not started | |
+| H3 | **Run the frozen ORB 15 min / 1R on years the lab has never seen (own hypothesis)**. Backfill SPY and QQQ 5-minute bars before 2024-10 and run the settings once, untouched. | Every number in modules 7 and 8 comes from the same two years, and the settings were picked on them. The split test showed Sharpe falling from 2.91 to 0.5-0.85. A true out-of-sample span is the only way to tell "small real edge" from "lucky picks". | Own: `backtests.split_validation`. Data tool: `data_pipeline --backfill-years`. | Backfill 3 to 5 years (needs IB Gateway paper, port 4002; slow because of IB request limits). Write the settings down in this file BEFORE running. Run once, report Sharpe, trades, Monte Carlo drawdown. No re-tuning. Also run on SPY with the same settings. | 4 | 3 | 12 | not started | |
+| A | **Last-half-hour momentum**: if the market is up since the prior close (Gao also uses the first half-hour), buy at about 15:30 and sell at the close. Variant: only on volatile days. | Option sellers and leveraged ETFs must trade in the direction of the day's move near the close, which pushes the last 30 minutes the same way. Reported on S&P 500 ETF data 1993 to 2013 and on over 60 futures, and it reverses over the following days. | [Gao, Han, Li, Zhou, "Market Intraday Momentum", JFE 2018](https://profiles.wustl.edu/en/publications/market-intraday-momentum/). Mechanism: [Baltussen, Da, Lammers, Martens, "Hedging Demand and Market Intraday Momentum", JFE 2021](https://pure.eur.nl/en/publications/hedging-demand-and-market-intraday-momentum/). Leveraged ETF flows: [Barbon et al., SFI 22-40](https://www.sfi.ch/de/publications/n-22-40-liquidity-provision-to-leveraged-etfs-and-equity-options-rebalancing-flows-evidence-from-end-of-day-stock-prices)* | New long-only strategy: signal at the 15:25 close, fill at 15:30 open, exit at the close. First check the plain statistic with pandas (does return so far today predict the last 30 minutes on SPY and QQQ?) before writing a strategy. Short side needs engine work (not supported today). | 3 | 4 | 12 | not started | |
+| B | **Noise-area intraday momentum on SPY**: compute a band around the open from the average same-time-of-day move of the last 14 days; trade only when price leaves the band, and use the band and VWAP as trailing stops. | A move outside the normal range for that time of day suggests a real demand or supply imbalance, so it tends to continue. Reported 2007 to early 2024: 19.6% a year, Sharpe 1.33, after costs. The authors also find it works through gamma imbalance. | [Zarattini, Aziz, Barbon, "Beat the Market: An Effective Intraday Momentum Strategy for S&P500 ETF (SPY)", SSRN 4824172](https://concretumgroup.com/beat-the-market-an-effective-intraday-momentum-strategy-for-sp500-etf-spy/). A TradingView user who coded it reported weaker results than the paper* | New strategy needing per-slot rolling averages (no look-ahead) and a trailing stop. Long-only first. Run on SPY and QQQ with the paper's fixed settings (14 days), no tuning, then the scorecard. Doubles as the "known at the time" regime signal for H1. | 4 | 3 | 12 | not started | |
+| G | **Small-gap fade**: after a small gap down (e.g. 0.1% to 0.25%), buy and target the prior close. Ignore large gaps. | Small gaps are said to close the same day most of the time (one site reports 78% for small up-gaps), while large gaps tend to keep going. Long-only fits a gap-down fade. | [SPY gap database, thetrading.tools](https://www.thetrading.tools/gap-analysis)* (unverified method). Caution on big gaps: [SentimenTrader on SPY breakaway gaps](https://sentimentrader.com/blog/breakaway-gap-on-spy)* | First compute the same-day fill rate by gap size on our own cache (pandas only, minutes). If the rate is above roughly 60% for a bucket, write the strategy. Bracket target = prior close, stop = 1 to 2 ATR. | 3 | 4 | 12 | not started | |
+| D | **Overnight vs. intraday split**: measure how much of SPY and QQQ's return in our two years comes close-to-open vs. open-to-close. | Research finds profits of different strategies sit entirely overnight or entirely intraday, often with opposite signs. Since every lab strategy is intraday-only, we should know how much return is in the part we skip. | [Lou, Polk, Skouras, "A Tug of War: Overnight Versus Intraday Expected Returns", JFE 2019](https://researchonline.lse.ac.uk/id/eprint/87481) | A diagnostic, not a strategy: a few lines of pandas on the cache. Output feeds the benchmark ("buy-and-hold QQQ" in walk-forward includes overnight, which an intraday strategy never earns). | 2 | 5 | 10 | not started | |
+| C | **VWAP trend, long above / short below, on QQQ**: stay long while price is above VWAP (session volume-weighted average price). | VWAP marks the average price paid today, so holding above it means buyers are in control. Reported 2018 to 2023 on QQQ: Sharpe about 2.1 and 9.4% max drawdown from the authors' own newsletter. Independent QuantConnect replications reported much lower results. | [Zarattini, Aziz, "Volume Weighted Average Price (VWAP): The Holy Grail for Day Trading Systems", SSRN 4631351](https://concretumgroup.com/volume-weighted-average-price-vwap-the-holy-grail-for-day-trading-systems/)*. Replication doubts: [QuantConnect](https://www.quantconnect.com/terminal/cache/embedded_backtest_0cab7e083e99d5a372e02fe882bbf078.html)* | Largely covered: `ema_trend` already uses close above VWAP and `spy_vwap_reclaim` exists. Cheapest test is a pure "above VWAP" long-only strategy via the existing `indicators.vwap`, then the scorecard. Short side would need engine work. | 2 | 4 | 8 | not started | |
+| E | **Same-time-of-day continuation**: a high return in a given 30-minute slot predicts a high return in the same slot on the following days. | The paper finds returns line up at lags of whole trading days (13 half-hours = one day) and last 40+ days, strongest in the first and last half-hour. Cause unclear (not volume, volatility or spreads). | [Heston, Korajczyk, Sadka, "Intraday Patterns in the Cross-section of Stock Returns", J. Finance 2010](https://ar5iv.arxiv.org/html/1005.3535) | Regression first: yesterday's return in each slot vs. today's, on SPY, QQQ and AAPL (we have AAPL 5-minute data). The paper is single stocks 2001 to 2005, so the effect may be much weaker in ETFs. Only build a strategy if the slot statistic is clearly non-zero. | 2 | 4 | 8 | not started | |
+| F | **Pre-FOMC drift**: stocks tend to rise before scheduled Federal Reserve rate decisions. | Reported about 49 basis points (0.49%) on average in the 24 hours before the announcement. Only the daytime part fits our no-overnight rule. | [Lucca, Moench, "The Pre-FOMC Announcement Drift", J. Finance 2015](https://cepr.org/voxeu/columns/predictable-movements-asset-prices-around-fomc-meetings). Replication: [R-bloggers update](https://www.r-bloggers.com/update-on-the-pre-fomc-announcement-drift/)* | Needs a hand-typed list of meeting dates. With two years there are only about 16 meetings, too few to tell anything from noise. Do only after H3 gives more history, and check whether the effect has faded since publication. | 2 | 2 | 4 | parked | |
+| S | **Opening range breakout on "stocks in play"** (stocks with unusual volume or news on the day), not on index ETFs. | The same ORB signal applied to a daily-selected few stocks with news; reported Sharpe 2.8 over 7,000+ stocks 2016 to 2023. | [Zarattini, Aziz, "Can Day Trading Really Be Profitable?", SSRN 4416622](https://papers.ssrn.com/abstract=4416622) and a related stocks-in-play paper (SSRN 4729284, title not confirmed)*. Independent replication on five indices: gross reproduced, net near zero: [MQL5 post](https://www.mql5.com/en/blogs/post/776235)* | Needs thousands of stocks of 5-minute data and a news or relative-volume screen. We only have SPY, QQQ and AAPL. Not testable with the current cache; park until the data pipeline is widened. | 4 | 1 | 4 | parked | |
+
+## Suggested order
+
+1. **H1** (trend-day filter): one afternoon, uses existing code, and fixes a measured weakness.
+2. **H2** (time exit for ORB): one small param, directly questions our best strategy's tuning.
+3. **A, G, D** (last half hour, small gap fade, overnight split): cheap first checks in pandas before any strategy code.
+4. **H3** (backfill): the most valuable test because it is the only real out-of-sample one, but needs the IB Gateway running. Do it before trusting any ORB number. Write down the frozen settings first.
+5. **B** (noise area): more work, but the best-documented SPY-specific idea and it feeds H1.
+
+## Cautions for every row
+
+- Two years of data is about 500 sessions. A strategy can look good or bad on that by luck. Count every variant we try as a trial when we compute the Deflated Sharpe (`judge.scorecard --trials N`).
+- Published results are often gross of spread and slippage, cover other years, or come from the authors' own newsletters. Replications of the Concretum-group papers report weaker results; treat the paper's Sharpe as an upper bound.
+- Several ideas are long-and-short in the papers. The lab's strategies and engine are long-only, so our version tests only half of what they report.
+- A positive result goes through `judge.scorecard` (8 rules) before it counts as anything.
+
+## Log
+
+- 2026-10-22: Journal created. 11 rows (3 own, 8 from the literature). Nothing tested yet.
