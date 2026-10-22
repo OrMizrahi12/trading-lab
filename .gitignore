@@ -30,3 +30,6 @@ reports/*.html
 
 # Research batch logs and done markers (scripts/research_batch.sh)
 research/batch_logs/
+
+# Leaderboard daily-return cache (research/leaderboard.py)
+research/leaderboard_cache/

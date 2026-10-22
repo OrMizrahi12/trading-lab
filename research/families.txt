@@ -1,0 +1,19 @@
+# Which researcher agent owns which journal idea. Read by scripts/research_batch.sh (--parallel and --agent).
+# Format: <journal id> <family>. Families = the agents in .claude/agents/ (researcher-<family>.md).
+# An idea with no line here is "unassigned": the sequential batch still runs it with no agent, --parallel skips it.
+# Add a line when you add a journal row.
+#
+# breakout-momentum: price leaves a range or trend and keeps going.
+# mean-reversion:    price stretches away from "normal" and snaps back.
+# time-of-day:       the clock matters (open, close, gaps, overnight, same-slot patterns).
+H1 mean-reversion
+H2 breakout-momentum
+H3 breakout-momentum
+A  time-of-day
+B  breakout-momentum
+C  breakout-momentum
+D  time-of-day
+E  time-of-day
+F  time-of-day
+G  mean-reversion
+S  breakout-momentum
