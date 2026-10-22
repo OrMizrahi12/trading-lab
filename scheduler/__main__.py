@@ -18,21 +18,44 @@ from datetime import date
 import pandas as pd
 
 from live.config import STATE_DIR
+from live.kill import main_precheck
 
 from . import report
 from .jobs import SystemIo, load_config, run_day
 from .plan import NY, next_open_plan, next_plans, plan_for
 
 
-def show(plans) -> None:
-    print(f"{'date':<12}{'':<5}{'prep':<7}{'runner':<8}{'flatten':<9}{'stop':<7}{'(New York)':<12}UTC offset  UTC prep/runner/flatten/stop")
+def utc_offset(ts: pd.Timestamp) -> str:
+    hours = ts.tz_convert(NY).utcoffset().total_seconds() / 3600
+    return f"UTC{hours:+g}"
+
+
+def format_plans(plans) -> list[str]:
+    rows = [f"{'date':<12}{'':<5}{'prep':<7}{'runner':<8}{'flatten':<9}{'stop':<7}{'zone':<6}{'UTC offset':<12}UTC prep/runner/flatten/stop"]
     for p in plans:
         ny = lambda t: f"{t.tz_convert(NY):%H:%M}"
         utc = lambda t: f"{t:%H:%M}"
-        offset = f"{p.prep.tz_convert(NY):%Z}"
         note = f"  half day, closes {ny(p.close)}" if p.half_day else ""
-        print(f"{p.session!s:<12}{p.session:%a}  {ny(p.prep):<7}{ny(p.runner):<8}{ny(p.flatten):<9}{ny(p.stop):<7}{offset:<12}"
-              f"{'':<11}{utc(p.prep)}/{utc(p.runner)}/{utc(p.flatten)}/{utc(p.stop)}{note}")
+        rows.append(f"{p.session!s:<12}{p.session:%a}  {ny(p.prep):<7}{ny(p.runner):<8}{ny(p.flatten):<9}{ny(p.stop):<7}"
+                    f"{p.prep.tz_convert(NY):%Z}{'':<3}{utc_offset(p.prep):<12}"
+                    f"{utc(p.prep)}/{utc(p.runner)}/{utc(p.flatten)}/{utc(p.stop)}{note}")
+    return rows
+
+
+def show(plans) -> None:
+    print("\n".join(format_plans(plans)))
+
+
+def dry_run_lines(plan, cfg, root=STATE_DIR) -> list[str]:
+    """What `--today --dry-run` prints: the timetable, and what the runner would do given the STOP file."""
+    lines = format_plans([plan])
+    what = f"{cfg.strategy} {cfg.symbol} {cfg.settings}"
+    if (stopped := main_precheck(root)) is not None:
+        lines += ["prep would run (it only reads and downloads data).",
+                  f"runner would be REFUSED, not started: {stopped}", f"(it would have run: {what})"]
+    else:
+        lines += ["prep would run.", f"runner would start: {what}"]
+    return lines
 
 
 def do_day(plan, cfg) -> None:
@@ -62,8 +85,7 @@ def main() -> None:
             print(f"{now.tz_convert(NY).date()}: the NYSE is shut today, nothing to run.")
             return
         if args.dry_run:
-            show([plan])
-            print(f"would run: {cfg.strategy} {cfg.symbol} {cfg.settings}")
+            print("\n".join(dry_run_lines(plan, cfg)))
             return
         if now >= plan.stop:
             print(f"{plan.session}: the day is already over (stop time {plan.stop.tz_convert(NY):%H:%M} New York).")

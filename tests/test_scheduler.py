@@ -267,3 +267,35 @@ def test_report_is_written_to_the_reports_folder(tmp_path):
     res = finished(tmp_path, {"halted": None, "position": None})
     path = report.write(res, CFG, tmp_path)
     assert path == tmp_path / "reports" / "2026-10-23.md" and path.read_text().startswith("# Daily report 2026-10-23")
+
+
+# -- the printed tables ------------------------------------------------------------------------------------------------
+
+def test_offset_column_is_filled_and_follows_daylight_saving():
+    from scheduler.__main__ import format_plans
+
+    rows = format_plans([plan_for(date(2026, 10, 30)), plan_for(date(2026, 11, 2))])
+    header = rows[0]
+    assert "UTC offset" in header
+    col = header.index("UTC offset")
+    assert rows[1][col:].startswith("UTC-4") and rows[2][col:].startswith("UTC-5")
+    assert "EDT" in rows[1] and "EST" in rows[2]
+    assert rows[1].endswith("13:00/13:25/19:55/20:05") and rows[2].endswith("14:00/14:25/20:55/21:05")
+
+
+def test_dry_run_says_the_runner_would_be_refused_when_stop_exists(tmp_path):
+    from scheduler.__main__ import dry_run_lines
+
+    plan = plan_for(date(2026, 10, 23))
+    stop_path(tmp_path).write_text("kill switch test\n")
+    text = "\n".join(dry_run_lines(plan, CFG, tmp_path))
+    assert "REFUSED" in text and "STOP file" in text and "runner would start" not in text
+    assert "prep would run" in text
+    assert stop_path(tmp_path).read_text() == "kill switch test\n"  # a dry run never touches it
+
+
+def test_dry_run_says_the_runner_would_start_without_stop(tmp_path):
+    from scheduler.__main__ import dry_run_lines
+
+    text = "\n".join(dry_run_lines(plan_for(date(2026, 10, 23)), CFG, tmp_path))
+    assert "runner would start: opening_range_breakout QQQ" in text and "REFUSED" not in text
