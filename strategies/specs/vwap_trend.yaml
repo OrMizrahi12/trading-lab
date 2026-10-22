@@ -1,0 +1,60 @@
+# vwap_trend spec. Paper trading / backtesting only, never real orders. Nothing here is financial advice.
+name: vwap_trend
+version: 1
+description: Be long while the 5-minute close is above VWAP (the day's volume-weighted average price, the average price paid today); buyers are in control. Long-only half of the Zarattini-Aziz VWAP trend idea.
+
+market:
+  symbol: QQQ
+  instrument: etf
+  direction: long
+
+timeframe:
+  bar_size: 5min
+  data_source: data/cache
+
+session:
+  timezone: America/New_York
+  start: "09:30"
+  end: "16:00"
+  skip_first_minutes: 15   # first signal 09:45
+  last_entry_time: "15:30" # 30 min before the real close
+
+indicators:
+  - {name: vwap, type: vwap}
+  - {name: atr14, type: atr, period: 14}
+
+entry:
+  side: long
+  conditions: ["close above VWAP", "previous bar close at or below VWAP"]
+  trigger: close crosses above VWAP
+  fill: next_open
+  max_trades_per_day: null  # re-entry allowed after an exit
+  max_open_positions: 1
+
+stop:
+  type: atr
+  atr: {period: 14, multiple: 2.0}
+
+take_profit:
+  type: none
+
+exit:
+  flatten_time: "15:55"
+  exit_on_signal: ["close below VWAP"]
+  priority: stop_first
+
+sizing:
+  method: risk_percent
+  risk_pct: 1.0
+  starting_equity: 100000
+  max_position_pct: 100
+  allow_fractional: false
+
+filters:
+  skip_dates: []
+
+costs:
+  commission_per_share: 0.0  # engine CostModel decides
+  slippage_per_share: 0.0
+
+notes: Short side (below VWAP) not built; the engine is long only. Many whipsaws expected around VWAP, so costs are the main risk.
