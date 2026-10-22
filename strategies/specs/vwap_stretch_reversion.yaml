@@ -3,7 +3,7 @@
 # Times are exchange local time (America/New_York) unless stated otherwise.
 
 name: vwap_stretch_reversion
-version: 1
+version: 2             # v2: optional max_open_distance_atr trend-day filter. Off by default, so v1 results are unchanged.
 description: >
   Buy when the close is more than 2 ATR (average bar size) below VWAP (the day's volume-weighted
   average price). The bet is that a price pushed this far under what the day's average buyer
@@ -88,7 +88,8 @@ filters:
   max_atr: null
   min_volume: null
   skip_dates: []
-  trend_filter: null
+  trend_filter:           # Optional trend-day filter (added in version 2), off by default (param max_open_distance_atr = null).
+    max_open_distance_atr: null  # No new entry once |signal close - today's open| is more than this many ATR(14). Known at the signal bar close, no look-ahead. Exits and stops are never blocked. Research setting: 5.0 (about the top third of baseline entries by distance).
 
 costs:
   commission_per_share: 0.01  # Engine CostModel defaults: 1c commission per side, 1c quoted spread (half per fill), 1c slippage on market fills.

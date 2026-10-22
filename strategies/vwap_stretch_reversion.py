@@ -14,7 +14,7 @@ import pandas as pd
 
 import indicators
 from strategies.base import Entry, Exit, Position, Strategy
-from strategies.session_clock import SessionClock, entry_blocked
+from strategies.session_clock import SessionClock, entry_blocked, trend_day_blocked
 
 
 @dataclass(frozen=True)
@@ -29,6 +29,7 @@ class VwapStretchReversionParams:
     flatten_minutes_before_close: int = 5
     no_entry_from: time | None = None  # e.g. time(11, 30): midday filter, off by default
     no_entry_until: time | None = None  # e.g. time(14, 0)
+    max_open_distance_atr: float | None = None  # trend-day filter: no entry once the close is further than this many ATRs from today's open; off by default
     timezone: str = indicators.SESSION_TZ
     calendar: str = "XNYS"  # NYSE
 
@@ -54,6 +55,7 @@ class VwapStretchReversion(Strategy):
             not may_enter
             or start.time() < p.first_signal
             or entry_blocked(start, p.no_entry_from, p.no_entry_until)
+            or trend_day_blocked(bars, p.timezone, p.max_open_distance_atr, p.atr_period)
         ):
             return None
         if len(bars) <= p.atr_period:

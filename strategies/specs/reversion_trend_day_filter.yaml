@@ -1,0 +1,85 @@
+# Journal idea H1: switch the reversion strategies off on likely trend days. Filled from strategies/specs/TEMPLATE.yaml.
+# Paper trading / backtesting only, never real orders. Nothing here is financial advice.
+# Times are exchange local time (America/New_York) unless stated otherwise.
+#
+# Not a new strategy: the entry, stop and exit rules are those of bollinger_rsi_reversion.yaml and
+# vwap_stretch_reversion.yaml (version 2). This file pins down the one added filter and the test plan.
+
+name: reversion_trend_day_filter
+version: 1
+description: >
+  Module 8 showed both reversion strategies lose on trend days (profit factor 0.43 to 0.68) and win
+  on other days (1.18 to 1.71), but the trend-day label used the whole day (hindsight). This tests
+  a version using only what is known at the signal bar: how far price already is from today's open,
+  in ATR (average bar size). The edge being chased is the other days' profit without the trend days' losses.
+
+market:
+  symbol: QQQ             # Also run on SPY. Same code, pass the other bars.
+  instrument: etf
+  direction: long
+
+timeframe:
+  bar_size: 5min
+  data_source: data/cache
+
+session:
+  timezone: America/New_York
+  start: "09:30"
+  end: "16:00"
+  skip_first_minutes: 15  # As the base strategies.
+  last_entry_time: "15:30"  # 30 minutes before the real close, as the base strategies.
+
+indicators:
+  - name: atr14
+    type: atr
+    period: 14
+    source: close
+
+entry:
+  side: long
+  conditions:
+    - "the base strategy's own entry trigger (bollinger_rsi_reversion or vwap_stretch_reversion)"
+    - "abs(signal close - today's first open) <= max_open_distance_atr * atr14"
+  trigger: "the base strategy's trigger"
+  fill: next_open
+  max_trades_per_day: null
+  max_open_positions: 1
+
+stop:
+  type: atr
+  atr:
+    period: 14
+    multiple: 2.0         # As the base strategies.
+
+take_profit:
+  type: none
+
+exit:
+  flatten_time: "15:55"
+  exit_on_signal:
+    - "as the base strategy (middle band or VWAP). The filter never blocks an exit."
+  priority: stop_first
+
+sizing:
+  method: risk_percent
+  risk_pct: 1.0
+  starting_equity: 100000
+  max_position_pct: 100
+  allow_fractional: false
+
+filters:
+  trend_filter: "abs(close - today's open) / ATR(14) <= 5.0 (param max_open_distance_atr)"
+
+costs:
+  commission_per_share: 0.01
+  slippage_per_share: 0.01
+
+notes: >
+  Pre-registered before any result: threshold 5.0 ATR, chosen from the distribution of the baseline
+  entries' distance from the open alone (no profit figures): the 2/3 quantile was 4.7 to 5.3 ATR on
+  SPY and QQQ, so 5.0 stands aside on roughly the top third of entries, matching the top-third
+  "trend day" label of reports/reversion_by_day_type. Absolute distance, so it also blocks entries
+  after a big rise. Distance is not scaled for time of day (a later bar has had more time to travel).
+  Not used: a 14-session average daily range, because the engine only shows a strategy the last 200
+  bars (about 2.5 sessions). Judged with --trials 8 (baseline and filtered, 2 strategies, 2 symbols);
+  Optuna is not given the filter to tune. No second threshold is tried in this run.

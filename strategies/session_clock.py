@@ -11,6 +11,8 @@ from datetime import time
 import exchange_calendars as xcals
 import pandas as pd
 
+import indicators
+
 BAR_MINUTES = 5
 
 
@@ -53,3 +55,31 @@ def entry_blocked(start: pd.Timestamp, no_entry_from: time | None, no_entry_unti
         return False
     fill = (start + pd.Timedelta(minutes=BAR_MINUTES)).time()
     return no_entry_from <= fill < no_entry_until
+
+
+def open_distance_atr(bars: pd.DataFrame, timezone: str, atr_period: int = 14) -> float | None:
+    """How far the last close is from today's open, in ATRs (average bar size). Always >= 0.
+
+    Uses only closed bars, so it is known at decision time. None while the ATR is undefined.
+    """
+    if len(bars) <= atr_period:
+        return None
+    local = bars.index.tz_convert(timezone).date
+    today_open = float(bars["open"][local == local[-1]].iloc[0])
+    atr = indicators.atr(bars["high"], bars["low"], bars["close"], atr_period).iloc[-1]
+    if pd.isna(atr) or atr <= 0:
+        return None
+    return abs(float(bars["close"].iloc[-1]) - today_open) / float(atr)
+
+
+def trend_day_blocked(
+    bars: pd.DataFrame, timezone: str, max_open_distance_atr: float | None, atr_period: int = 14
+) -> bool:
+    """True if the trend-day filter is on and price is already further than that many ATRs from today's open.
+
+    Unknown (ATR not defined yet) counts as blocked: no entry without the information.
+    """
+    if max_open_distance_atr is None:
+        return False
+    dist = open_distance_atr(bars, timezone, atr_period)
+    return dist is None or dist > max_open_distance_atr

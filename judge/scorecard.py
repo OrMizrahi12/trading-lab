@@ -48,6 +48,7 @@ from reports.orb_stress_test import monte_carlo, pct, scaled, trade_returns
 from strategies.bollinger_rsi_reversion import BollingerRsiReversion, BollingerRsiReversionParams
 from strategies.donchian_breakout import DonchianBreakout, DonchianBreakoutParams
 from strategies.opening_range_breakout import OpeningRangeBreakout, OpeningRangeBreakoutParams
+from strategies.vwap_stretch_reversion import VwapStretchReversion, VwapStretchReversionParams
 
 STANDARDS = Path(__file__).with_name("standards.yaml")
 ANN = sqrt(TRADING_DAYS)
@@ -70,6 +71,8 @@ STRATEGIES = {
     "bollinger_rsi_reversion": Spec(BollingerRsiReversion, BollingerRsiReversionParams,
                                     {"bb_period": (10, 40, 5), "bb_k": (1.5, 3.0, None),
                                      "rsi_max": (5.0, 25.0, None), "atr_multiple": (1.0, 4.0, None)}),
+    "vwap_stretch_reversion": Spec(VwapStretchReversion, VwapStretchReversionParams,
+                                   {"stretch_atr_multiple": (1.0, 4.0, None), "atr_multiple": (1.0, 4.0, None)}),
 }
 
 
