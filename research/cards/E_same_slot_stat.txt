@@ -1,0 +1,51 @@
+SPY 370 full days
+ pooled lag1 corr -0.0336  p(|.|)=0.011  (n pairs 4797)
+ lags2-5: [np.float64(0.033), np.float64(-0.017), np.float64(-0.01), np.float64(0.006)]
+ control other-slot lag1 mean corr -0.0235
+  slot  0 (9:30) r=-0.135 p=0.008
+  slot  1 (10:00) r=-0.056 p=0.270
+  slot  2 (10:30) r=+0.057 p=0.280
+  slot  3 (11:00) r=-0.012 p=0.803
+  slot  4 (11:30) r=-0.138 p=0.007
+  slot  5 (12:00) r=-0.167 p=0.003
+  slot  6 (12:30) r=+0.155 p=0.010
+  slot  7 (13:00) r=-0.217 p=0.008
+  slot  8 (13:30) r=+0.249 p=0.002
+  slot  9 (14:00) r=+0.085 p=0.115
+  slot 10 (14:30) r=+0.080 p=0.127
+  slot 11 (15:00) r=-0.299 p=0.000
+  slot 12 (15:30) r=-0.036 p=0.490
+QQQ 370 full days
+ pooled lag1 corr -0.0211  p(|.|)=0.135  (n pairs 4797)
+ lags2-5: [np.float64(0.032), np.float64(-0.013), np.float64(-0.006), np.float64(0.011)]
+ control other-slot lag1 mean corr -0.0209
+  slot  0 (9:30) r=-0.020 p=0.684
+  slot  1 (10:00) r=-0.026 p=0.617
+  slot  2 (10:30) r=+0.050 p=0.309
+  slot  3 (11:00) r=-0.048 p=0.351
+  slot  4 (11:30) r=-0.127 p=0.015
+  slot  5 (12:00) r=-0.127 p=0.018
+  slot  6 (12:30) r=+0.155 p=0.007
+  slot  7 (13:00) r=-0.194 p=0.008
+  slot  8 (13:30) r=+0.178 p=0.006
+  slot  9 (14:00) r=+0.109 p=0.037
+  slot 10 (14:30) r=+0.078 p=0.113
+  slot 11 (15:00) r=-0.306 p=0.000
+  slot 12 (15:30) r=+0.004 p=0.953
+AAPL 21 full days
+ pooled lag1 corr -0.0475  p(|.|)=0.573  (n pairs 260)
+ lags2-5: [np.float64(-0.037), np.float64(-0.097), np.float64(-0.004), np.float64(-0.026)]
+ control other-slot lag1 mean corr 0.0412
+  slot  0 (9:30) r=-0.282 p=0.250
+  slot  1 (10:00) r=-0.079 p=0.732
+  slot  2 (10:30) r=-0.084 p=0.738
+  slot  3 (11:00) r=+0.080 p=0.743
+  slot  4 (11:30) r=+0.019 p=0.939
+  slot  5 (12:00) r=-0.134 p=0.592
+  slot  6 (12:30) r=+0.341 p=0.143
+  slot  7 (13:00) r=-0.533 p=0.012
+  slot  8 (13:30) r=-0.088 p=0.718
+  slot  9 (14:00) r=-0.016 p=0.955
+  slot 10 (14:30) r=+0.405 p=0.069
+  slot 11 (15:00) r=+0.052 p=0.820
+  slot 12 (15:30) r=-0.292 p=0.227
