@@ -3,7 +3,8 @@
 The opening range is the high and low of the first N minutes after the 09:30 open (N = 5 or
 15). Buy when a 5-minute bar closes above that high: the bet is that leaving the opening
 range upward starts a move that lasts into the close. Stop: the low of the opening range.
-No profit target: hold to the stop or the flatten just before the close. At most one entry a
+No profit target by default (optional `target_r`: sell at entry + target_r x (entry - stop)):
+hold to the stop or the flatten just before the close. At most one entry a
 day: only the FIRST bar that meets the entry rule counts, so after a stop-out the strategy
 does not buy again. With `require_above_vwap` the close must also be above VWAP (the day's
 volume-weighted average price), so the buy only happens when the breakout is also above what
@@ -27,6 +28,7 @@ class OpeningRangeBreakoutParams:
 
     range_minutes: int = 5  # length of the opening range: 5 or 15 (a multiple of the bar size)
     require_above_vwap: bool = False  # the VWAP variant sets this to True
+    target_r: float | None = None  # profit target in R (multiples of entry - stop); None = no target
     open_time: time = time(9, 30)
     last_entry_minutes_before_close: int = 30
     flatten_minutes_before_close: int = 5
@@ -36,6 +38,8 @@ class OpeningRangeBreakoutParams:
     def __post_init__(self):
         if self.range_minutes <= 0 or self.range_minutes % BAR_MINUTES:
             raise ValueError(f"range_minutes must be a multiple of {BAR_MINUTES}")
+        if self.target_r is not None and self.target_r <= 0:
+            raise ValueError("target_r must be positive (or None for no target)")
 
 
 class OpeningRangeBreakout(Strategy):
@@ -85,4 +89,5 @@ class OpeningRangeBreakout(Strategy):
         entry = float(after["close"].iloc[-1])
         if range_low >= entry:
             return None
-        return Entry(stop=range_low, target=float("inf"), reason="opening_range_breakout")
+        target = float("inf") if p.target_r is None else entry + p.target_r * (entry - range_low)
+        return Entry(stop=range_low, target=target, reason="opening_range_breakout")

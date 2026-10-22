@@ -37,6 +37,18 @@ def test_5min_range_close_above_the_high_is_an_entry_with_the_range_low_stop():
     assert d.target == float("inf")
 
 
+def test_target_r_sets_the_target_that_many_stop_distances_above_the_close():
+    orb = OpeningRangeBreakout(OpeningRangeBreakoutParams(range_minutes=5, target_r=2.0))
+    d = orb.on_bar(today_bars([100.0, 100.5]), None)
+    assert d.stop == pytest.approx(99.8)
+    assert d.target == pytest.approx(100.5 + 2.0 * (100.5 - 99.8))
+
+
+def test_target_r_must_be_positive():
+    with pytest.raises(ValueError):
+        OpeningRangeBreakoutParams(target_r=0)
+
+
 def test_close_at_or_below_the_range_high_is_not_a_breakout():
     assert ORB5.on_bar(today_bars([100.0, 100.2]), None) is None  # equal to the high
     assert ORB5.on_bar(today_bars([100.0, 100.1]), None) is None
