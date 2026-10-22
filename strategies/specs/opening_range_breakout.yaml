@@ -1,0 +1,104 @@
+# Opening range breakout (ORB). Filled from strategies/specs/TEMPLATE.yaml.
+# Paper trading / backtesting only, never real orders. Nothing here is financial advice.
+# Times are exchange local time (America/New_York) unless stated otherwise.
+
+name: opening_range_breakout
+version: 1
+description: >
+  The opening range is the high and low of the first N minutes after the open (N = 5 or 15).
+  Buy when a 5-minute bar closes above the range high, stop at the range low, hold to the
+  close. The bet is that an upward break out of the opening range starts a move that lasts
+  into the close. A variant (require_above_vwap) also needs the close above VWAP.
+
+market:
+  symbol: SPY             # Same code runs on QQQ: pass QQQ bars to the engine.
+  instrument: etf
+  direction: long         # Long only. The papers trade both directions; we do not short.
+
+timeframe:
+  bar_size: 5min
+  data_source: data/cache
+
+session:
+  timezone: America/New_York
+  start: "09:30"
+  end: "16:00"
+  skip_first_minutes: null  # Set by range_minutes: signal bars start once the range is complete (09:35 for N=5, 09:45 for N=15).
+  last_entry_time: "15:30"  # Measured as 30 minutes before the real NYSE close (13:30 on a half day). ASSUMPTION: same as the other strategies.
+
+parameters:
+  range_minutes: 5        # 5 or 15. Must be a multiple of the 5-minute bar size.
+  require_above_vwap: false  # true = the VWAP variant.
+
+indicators:
+  - name: range_high
+    type: highest_high
+    source: high          # Highest high of the bars starting in [09:30, 09:30 + N minutes).
+  - name: range_low
+    type: lowest_low
+    source: low           # Lowest low of the same bars.
+  - name: vwap
+    type: vwap            # Used by the VWAP variant only. Resets each session.
+
+entry:
+  side: long
+  conditions:
+    - "signal bar starts at or after 09:30 + N minutes (the range has fully closed) and before last_entry_time"
+    - "variant only: close > vwap"
+  trigger: "close > range_high"  # Strictly greater: a close equal to the high is not a breakout.
+  fill: next_open
+  max_trades_per_day: 1   # Only the FIRST bar of the day that meets the trigger (and the variant's VWAP condition) is a buy; no re-entry after a stop-out. Enforced by looking at earlier bars of the same day, so the strategy stays a pure function.
+  max_open_positions: 1
+
+stop:
+  type: swing
+  fixed_pct: null
+  atr: null
+  swing:
+    lookback_bars: null   # The opening range low, fixed for the day.
+    buffer: 0.0
+  combine: null
+  trailing:
+    enabled: false
+    distance_atr: null
+  time_stop:
+    enabled: false
+    max_bars: null
+
+take_profit:
+  type: none              # No target. (The QQQ paper uses 10R as a base case; 10R is almost never reached intraday.)
+  r_multiple: null
+  fixed_pct: null
+  atr_multiple: null
+
+exit:
+  flatten_time: "15:55"   # Measured as 5 minutes before the real NYSE close (12:55 on a half day). Sell at the open of the 15:55 bar if still open.
+  exit_on_signal: []
+  priority: stop_first
+
+sizing:
+  method: risk_percent
+  risk_pct: 1.0           # Lose 1% of the account if the stop is hit (project default).
+  shares: null
+  dollars: null
+  starting_equity: 100000
+  max_position_pct: 100   # No leverage. A tight stop (the range low is often close) hits this cap, so real risk is often under 1%. The papers allow 4x leverage.
+  allow_fractional: false
+
+filters:
+  min_atr: null
+  max_atr: null
+  min_volume: null
+  skip_dates: []
+  trend_filter: null
+
+costs:
+  commission_per_share: 0.01  # Engine CostModel defaults: 1c commission per side, 1c quoted spread (half per fill), 1c slippage on market fills.
+  slippage_per_share: 0.01
+
+notes: >
+  Assumptions I added beyond your idea: "exit at the close" is read as a flatten 5 minutes
+  before the real close; no entries in the last 30 minutes; one entry per day (the first
+  qualifying bar); a range is complete only if all its bars are present. "Breaks above the
+  high" is read as a bar CLOSE strictly above it, filled at the next open. Backtest runs
+  N = 5 and 15, each with and without the VWAP filter.
