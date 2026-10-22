@@ -48,13 +48,13 @@ def reconnect_paper(ib, host: str = HOST, port: int = PORT, client_id: int = CLI
         raise
 
 
-def connect_paper(ib_factory=IB, host: str = HOST, port: int = PORT, client_id: int = CLIENT_ID):
-    """Connect (read-write, so orders are possible) to the paper Gateway; disconnect and raise on any failed check."""
+def connect_paper(ib_factory=IB, host: str = HOST, port: int = PORT, client_id: int = CLIENT_ID, readonly: bool = False):
+    """Connect to the paper Gateway (read-write so orders are possible, unless `readonly`); disconnect and raise on any failed check."""
     if host not in {"127.0.0.1", "localhost"} or port not in PAPER_PORTS:
         raise PaperGuardError(f"Refusing to connect to {host}:{port}")
     ib = ib_factory()
     try:
-        ib.connect(host, port, clientId=client_id)
+        ib.connect(host, port, clientId=client_id, **({"readonly": True} if readonly else {}))
         check_paper(ib, host, port)
         ib.reqMarketDataType(DELAYED)
     except BaseException:

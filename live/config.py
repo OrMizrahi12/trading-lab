@@ -4,7 +4,8 @@ from pathlib import Path
 
 from data_pipeline.config import HOST, PAPER_PORTS, PORT
 
-CLIENT_ID = 6  # Unique per Gateway connection (1-5 are taken, see AGENTS.md).
+CLIENT_ID = 6  # Unique per Gateway connection (1-5 and 7 are taken, see AGENTS.md).
+JOURNAL_CLIENT_ID = 7  # live.journal_import, read-only
 
 if PORT not in PAPER_PORTS:
     raise RuntimeError(f"Refusing to connect: port {PORT} is not a paper port")
@@ -12,6 +13,8 @@ if HOST not in {"127.0.0.1", "localhost"}:
     raise RuntimeError(f"Refusing to connect: host {HOST} is not local")
 
 STATE_DIR = Path(__file__).parent.parent / "data" / "live"  # gitignored runtime files
+JOURNAL_PATH = STATE_DIR / "journal.sqlite3"
+SNAPSHOT_EVERY_S = 600  # the runner takes an account snapshot at most this often
 
 BAR_MINUTES = 5
 POLL_SECONDS = 60

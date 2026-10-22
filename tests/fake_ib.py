@@ -41,6 +41,9 @@ class FakeIB:
         self.now = None  # time stamped on fills
         self.errorEvent = Event()
         self._forgotten = set()  # trades a restarted session does not know (see restart)
+        self.commission_per_share, self.commission_min = 0.005, 1.0  # IB's usual US stock rate
+        self.delay_commissions = False  # True: commission reports arrive only on release_commissions()
+        self._exec_n = 0
 
     def connect(self, host, port, clientId=0, **kwargs):
         self.connected = True
@@ -143,9 +146,17 @@ class FakeIB:
         sign = 1 if order.action == "BUY" else -1
         symbol = trade.contract.symbol
         self.holdings[symbol] = self.holdings.get(symbol, 0) + sign * shares
-        trade.fills.append(SimpleNamespace(execution=SimpleNamespace(
-            time=self.now, shares=shares, price=price, orderRef=getattr(order, "orderRef", ""), orderId=order.orderId,
-            side="BOT" if order.action == "BUY" else "SLD")))
+        self._exec_n += 1
+        fill = SimpleNamespace(
+            contract=trade.contract, time=self.now,
+            execution=SimpleNamespace(
+                execId=f"fake.{self._exec_n}", time=self.now, acctNumber=self.accounts[0], exchange="FAKE", shares=shares,
+                price=price, orderRef=getattr(order, "orderRef", ""), orderId=order.orderId, permId=0, clientId=0,
+                side="BOT" if order.action == "BUY" else "SLD"),
+            commissionReport=SimpleNamespace(execId="", commission=0.0, currency="", realizedPNL=0.0))  # empty = not yet
+        trade.fills.append(fill)
+        if not self.delay_commissions:
+            self._report(fill)
         for child in self._trades:  # a bracket's children wake up when their parent has a fill
             if getattr(child.order, "parentId", 0) == order.orderId and child.orderStatus.status == "PreSubmitted":
                 child.orderStatus.status = "Submitted"
@@ -153,6 +164,24 @@ class FakeIB:
             for other in self._trades:
                 if other is not trade and getattr(other.order, "ocaGroup", "") == order.ocaGroup and not other.isDone():
                     other.orderStatus.status = "Cancelled"
+
+    def _report(self, fill):
+        rep, ex = fill.commissionReport, fill.execution
+        rep.execId, rep.currency = ex.execId, "USD"
+        rep.commission = max(ex.shares * self.commission_per_share, self.commission_min)
+
+    def release_commissions(self):
+        """The late commission reports arrive."""
+        for f in self.reqExecutions():
+            if not f.commissionReport.execId:
+                self._report(f)
+
+    def fills(self):
+        return self.reqExecutions()
+
+    def reqCompletedOrders(self, apiOnly):
+        """Orders IB finished that a restarted session no longer lists in trades()."""
+        return [t for t in self._trades if id(t) in self._forgotten]
 
     def trigger(self, trade, price):
         """A resting stop or target gets hit at `price`."""

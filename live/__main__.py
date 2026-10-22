@@ -13,9 +13,10 @@ import sys
 
 from .alerts import Alerter
 from .broker import connect_paper, reconnect_paper
-from .config import FLATTEN_BEFORE_CLOSE_MIN, PAPER_PORTS, PORT, STATE_DIR
+from .config import FLATTEN_BEFORE_CLOSE_MIN, JOURNAL_PATH, PAPER_PORTS, PORT, STATE_DIR
 from .daily_log import engine_dirs, setup_multi_logging
 from .engines import Pair, load_pairs
+from .journal import Journal
 from .kill import main_precheck
 from .multi import MultiRunner
 from .registry import STRATEGIES, parse_settings
@@ -89,6 +90,11 @@ def main() -> None:
     else:
         setup_logging(run_dir(pairs[0].strategy, pairs[0].symbol, STATE_DIR))
     alerter = Alerter.from_env()
+    try:
+        journal = Journal(JOURNAL_PATH)  # a record, not a control: without it the engine still trades
+    except Exception as e:
+        journal = None
+        print(f"journal: could not open {JOURNAL_PATH} ({e}); trading goes on without it")
     ib = None
     try:
         ib = connect_paper(port=args.port)  # refuses a non-paper port, a remote host or any account not starting with DU
@@ -96,7 +102,7 @@ def main() -> None:
         runners = [Runner(ib, p.strategy, p.symbol, p.settings, dry_run=args.dry_run, catch_up=args.catch_up,
                           flatten_on_mismatch=args.flatten_on_mismatch, clear_halt=args.clear_halt, risk=risk,
                           port=args.port, flatten_before_close_min=args.flatten_before_close_min,
-                          alerter=alerter, link=link, reconnect=lambda: reconnect_paper(ib, port=args.port))
+                          alerter=alerter, link=link, journal=journal, reconnect=lambda: reconnect_paper(ib, port=args.port))
                    for p in pairs]
         if args.config:
             MultiRunner(runners).run(once=args.once)
@@ -108,6 +114,8 @@ def main() -> None:
     finally:
         if ib is not None:
             ib.disconnect()
+        if journal is not None:
+            journal.close()
         alerter.close()  # let a last alert (a halt, the kill switch) go out before the process ends
 
 

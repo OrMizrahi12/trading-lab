@@ -27,10 +27,12 @@ from strategies.session_clock import SessionClock
 from .alerts import NO_ALERTS, Alerter
 from .broker import Broker, PaperGuardError, check_paper
 from .config import (CLIENT_ID, FLATTEN_BEFORE_CLOSE_MIN, HOLE_WAIT_MIN, HOST, LOOKBACK_BARS, MAX_SIGNAL_AGE_MIN,
-                     MAX_TICK_ERRORS, POLL_SECONDS, PORT, RECONNECT_ATTEMPTS, RECONNECT_WAIT_S, STATE_DIR)
+                     MAX_TICK_ERRORS, POLL_SECONDS, PORT, RECONNECT_ATTEMPTS, RECONNECT_WAIT_S, SNAPSHOT_EVERY_S,
+                     STATE_DIR)
 from .console import bar_line, position_text, say
 from .execution import DuplicateEntry, ExecutionHalt, Executor, utc_now
 from .feed import BAR, NY, BarFeed
+from .journal import Journal
 from .reconcile import ib_shares, reconcile
 from .refs import entry_ref, owns
 from .risk import Risk, RiskRefused, stop_path
@@ -58,12 +60,14 @@ class Runner:
                  max_signal_age_min: int = MAX_SIGNAL_AGE_MIN, flatten_before_close_min: int = FLATTEN_BEFORE_CLOSE_MIN,
                  lookback: int = LOOKBACK_BARS, contract=None, risk: Risk | None = None, reconnect=None,
                  reconnect_attempts: int = RECONNECT_ATTEMPTS, reconnect_wait_s: float = RECONNECT_WAIT_S, port: int = PORT,
-                 alerter: Alerter | None = None, link: Link | None = None):
+                 alerter: Alerter | None = None, link: Link | None = None, journal: Journal | None = None):
         self.ib, self.name, self.symbol, self.dry_run, self.clock = ib, name, symbol, dry_run, clock
         self.contract = contract or Stock(symbol, "SMART", "USD")
         self.tag = f"live:{name}:{symbol}"
         self.label = f"{symbol} {name}"  # who an alert or a console line is about
         self.alerter = alerter or NO_ALERTS
+        self.journal = journal  # the SQLite trade journal (live/journal.py); None = not kept
+        self._last_snapshot = float("-inf")  # time.monotonic() of the last account snapshot
         self.link = link or Link()
         self._seen_epoch = self.link.epoch
         self._exit_alerted: set[str] = set()  # entry times whose exit has been alerted: one alert per trade
@@ -112,6 +116,7 @@ class Runner:
         if res.problems and self.flatten_on_mismatch and not self.dry_run:
             res = self._flatten_mismatch(res)
         self._report(res)
+        self._journal_sync(full=True)  # fills of an earlier run today, before anything can halt
         if res.problems:
             self._halt("reconcile: " + "; ".join(res.problems))
             return
@@ -199,6 +204,30 @@ class Runner:
         self.dir.mkdir(parents=True, exist_ok=True)
         with (self.dir / filename).open("a") as f:
             f.write(json.dumps(record, default=str) + "\n")
+        if filename == "signals.jsonl" and self.journal is not None:
+            ref = entry_ref(self.tag, pd.Timestamp(record["bar"])) if record["kind"] == "entry" else None
+            self._journal(lambda: self.journal.signal(self.tag, record, entry_ref=ref, dry_run=self.dry_run))
+
+    def _journal(self, write) -> None:
+        """The journal is a record, not a control: a failed write is logged and trading goes on."""
+        try:
+            write()
+        except Exception as e:
+            log.warning("journal write failed (trading goes on): %s: %s", type(e).__name__, e)
+
+    def _journal_sync(self, full: bool = False) -> None:
+        """Copy this engine's orders and fills (with commission) from IB into the journal; an account snapshot at
+        most every SNAPSHOT_EVERY_S. `full` also asks IB for the day's earlier executions and finished orders.
+        A dry run sends nothing, so it has nothing to copy."""
+        if self.journal is None or self.dry_run:
+            return
+
+        def write():
+            self.journal.sync(self.ib, owns=lambda ref: owns(self.tag, ref), full=full, completed=full)
+            if full or time.monotonic() - self._last_snapshot >= SNAPSHOT_EVERY_S:
+                self.journal.snapshot(self.ib)
+                self._last_snapshot = time.monotonic()
+        self._journal(write)
 
     # -- one poll ------------------------------------------------------------------------
 
@@ -273,6 +302,7 @@ class Runner:
         res = reconcile(self.ib, self.broker, self.state)
         self._report(res)
         log.info("connection to IB restored; reconcile %s", "OK" if res.ok else "found problems")
+        self._journal_sync(full=True)
         if res.problems:
             self._halt("reconcile after reconnect: " + "; ".join(res.problems))
             return
@@ -286,6 +316,10 @@ class Runner:
         self._save()
 
     def tick(self) -> None:
+        self._poll()
+        self._journal_sync()  # fills and commissions that arrived during the poll
+
+    def _poll(self) -> None:
         if self._stop_seen():
             return
         if self.state.halted:
