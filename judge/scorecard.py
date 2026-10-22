@@ -58,6 +58,7 @@ from strategies.bollinger_rsi_reversion import BollingerRsiReversion, BollingerR
 from strategies.donchian_breakout import DonchianBreakout, DonchianBreakoutParams
 from strategies.opening_range_breakout import OpeningRangeBreakout, OpeningRangeBreakoutParams
 from strategies.vwap_stretch_reversion import VwapStretchReversion, VwapStretchReversionParams
+from strategies.vwap_trend import VwapTrend, VwapTrendParams
 
 STANDARDS = Path(__file__).with_name("standards.yaml")
 RESEARCH = Path(__file__).resolve().parent.parent / "research"  # holds trials.csv and audit_log.jsonl
@@ -85,6 +86,8 @@ STRATEGIES = {
                                      "rsi_max": (5.0, 25.0, None), "atr_multiple": (1.0, 4.0, None)}),
     "vwap_stretch_reversion": Spec(VwapStretchReversion, VwapStretchReversionParams,
                                    {"stretch_atr_multiple": (1.0, 4.0, None), "atr_multiple": (1.0, 4.0, None)}),
+    "vwap_trend": Spec(VwapTrend, VwapTrendParams,
+                       {"atr_multiple": (1.0, 4.0, None)}),
 }
 
 
