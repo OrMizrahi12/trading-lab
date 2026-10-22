@@ -16,6 +16,9 @@ venv/
 .ruff_cache/
 .mypy_cache/
 
+# Stop-hook block counter (.claude/hooks/research_gate.py)
+.claude/research_gate.count
+
 # Secrets
 .env
 
