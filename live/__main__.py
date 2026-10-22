@@ -36,6 +36,8 @@ def main() -> None:
                     help="everything except sending orders; decisions are logged to signals.jsonl")
     ap.add_argument("--catch-up", type=int, default=0, metavar="N",
                     help="dry run only: on a fresh state, also step the last N closed bars to show their decisions")
+    ap.add_argument("--clear-halt", action="store_true",
+                    help="resume after a halt: only once you have checked IB and the reconcile result is clean")
     ap.add_argument("--flatten-on-mismatch", action="store_true",
                     help="on start, sell shares IB holds that the state file cannot explain (default: halt)")
     args = ap.parse_args()
@@ -47,7 +49,7 @@ def main() -> None:
     ib = connect_paper()  # refuses a non-paper port, a remote host or any account not starting with DU
     try:
         Runner(ib, args.strategy, args.symbol, settings, dry_run=args.dry_run, catch_up=args.catch_up,
-               flatten_on_mismatch=args.flatten_on_mismatch).run(once=args.once)
+               flatten_on_mismatch=args.flatten_on_mismatch, clear_halt=args.clear_halt).run(once=args.once)
     finally:
         ib.disconnect()
 

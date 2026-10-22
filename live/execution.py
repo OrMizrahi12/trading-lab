@@ -26,6 +26,7 @@ from .state import PositionState
 log = logging.getLogger("live")
 
 POLL_S = 0.5  # how often we look at a resting order
+CANCEL_WAIT_S = 15  # how long a cancel may take to be confirmed before we stop and call a human
 
 
 class ExecutionHalt(RuntimeError):
@@ -44,9 +45,10 @@ def utc_now() -> pd.Timestamp:
 
 
 def net_liquidation(ib) -> float:
-    """The account's total value (cash plus positions), in dollars."""
-    for row in ib.accountSummary():
-        if row.tag == "NetLiquidation" and row.currency in ("USD", "BASE"):
+    """The first managed (paper) account's total value, cash plus positions, in dollars."""
+    account = ib.managedAccounts()[0]
+    for row in ib.accountSummary(account):
+        if row.tag == "NetLiquidation" and row.currency in ("USD", "BASE") and row.account == account:
             return float(row.value)
     raise RuntimeError("IB did not report NetLiquidation")
 
@@ -62,15 +64,18 @@ class Executor:
     # -- sizing --------------------------------------------------------------------------
 
     def size(self, entry: Entry, ref_price: float) -> int:
-        """Shares so that a stop-out costs 1% of the account, same formula as the backtester, no leverage.
+        """Shares so that a stop-out costs at most 1% of the account, the backtester's formula, no leverage.
 
         `ref_price` is the last known price (the signal bar's close); the backtester sizes on the real next open.
         Returns 0 when the stop is not below the price (the backtester drops those entries too).
         """
-        fill = self.costs.buy(ref_price)
+        if not entry.stop < self.costs.buy(ref_price):
+            return 0
+        # Size on the worst price the limit allows, so a fill at the cap still risks no more than 1%.
+        fill = self.costs.buy(ref_price * (1 + self.offset_pct))
         risk_ps = (fill - entry.stop + 2 * self.costs.commission_per_share
                    + self.costs.spread / 2 + self.costs.slippage_per_share)
-        if not entry.stop < fill or risk_ps <= 0:
+        if risk_ps <= 0:
             return 0
         equity = net_liquidation(self.ib)
         qty = self.sizer.shares(equity=equity, fill=fill, risk_per_share=risk_ps,
@@ -99,7 +104,10 @@ class Executor:
         if not trade.isDone():
             log.warning("exec: %s %d %s did not finish in %ss, cancelling", action, shares, self.contract.symbol, self.timeout_s)
             self.broker.cancel(order)
-            self._wait(trade, 5)
+            self._wait(trade, CANCEL_WAIT_S)
+            if not trade.isDone():  # it may still fill: we cannot know what we hold, so stop here
+                raise ExecutionHalt(f"{action} order {order.orderId} is not confirmed cancelled after "
+                                    f"{CANCEL_WAIT_S}s; check IB before trading")
         filled = int(trade.orderStatus.filled)
         if filled == 0:
             return None
@@ -119,10 +127,10 @@ class Executor:
     def protect(self, pos: PositionState) -> None:
         """Place the stop (and the target, if any) as a one-cancels-other pair resting at IB. Records the order ids."""
         symbol = self.contract.symbol
-        stop = StopOrder("SELL", pos.shares, round(pos.stop, 2), tif="DAY")
+        stop = StopOrder("SELL", pos.shares, round(pos.stop, 2), tif="GTC")  # GTC: stays if the runner is down at the close
         orders = [stop]
         if pos.target is not None:
-            orders.append(LimitOrder("SELL", pos.shares, round(pos.target, 2), tif="DAY"))
+            orders.append(LimitOrder("SELL", pos.shares, round(pos.target, 2), tif="GTC"))
             group = f"{self.broker.tag}:{self.clock().strftime('%H%M%S')}"
             for o in orders:  # when one fills, IB cancels the other
                 o.ocaGroup, o.ocaType = group, 1
@@ -131,30 +139,48 @@ class Executor:
             return
         pos.stop_order_id = trades[0].order.orderId
         pos.target_order_id = trades[1].order.orderId if len(trades) > 1 else None
+        self.ib.sleep(1)  # give IB a moment to accept or reject
+        dead = [t for t in trades if t.isDone() and t.orderStatus.status != "Filled"]
+        if dead:
+            for t in trades:
+                if not t.isDone():
+                    self.broker.cancel(t.order)
+            raise ExecutionHalt(f"IB did not accept the stop/target for {pos.shares} {symbol}: "
+                                f"{[(t.order.orderId, t.orderStatus.status) for t in dead]}")
         log.info("exec: protecting %d %s, stop %.2f target %s", pos.shares, symbol, pos.stop, pos.target)
 
-    def cancel_protection(self, pos: PositionState) -> None:
+    def cancel_protection(self, pos: PositionState) -> int:
+        """Cancel the stop/target and wait for IB to confirm. Returns the shares they filled (a stop may beat us).
+
+        The order ids stay on `pos` so the runner can still look up what filled; `protect` overwrites them.
+        """
         ids = {pos.stop_order_id, pos.target_order_id} - {None}
-        for t in list(self.ib.openTrades()):
-            if t.order.orderRef == self.broker.tag and t.order.orderId in ids:
+        ours = [t for t in self.ib.trades() if t.order.orderRef == self.broker.tag and t.order.orderId in ids]
+        for t in ours:
+            if not t.isDone():
                 self.broker.cancel(t.order)
-                self._wait(t, 5)
-        pos.stop_order_id = pos.target_order_id = None
+                self._wait(t, CANCEL_WAIT_S)
+                if not t.isDone():
+                    raise ExecutionHalt(f"order {t.order.orderId} is not confirmed cancelled after "
+                                        f"{CANCEL_WAIT_S}s; check IB before trading")
+        return sum(int(t.orderStatus.filled) for t in ours)
 
     # -- exit ----------------------------------------------------------------------------
 
     def exit(self, pos: PositionState, ref: float) -> Fill | None:
-        """Sell the whole position. Stop and target are cancelled first; the sell is re-priced wider if it stalls.
+        """Sell `pos.shares`. Stop and target are cancelled first; the sell is re-priced wider if it stalls.
 
-        Returns None if nothing was left to sell (the stop or target got there first). If the position cannot be
-        closed, the stop/target are put back and ExecutionHalt is raised: a stuck exit is never silent.
+        Never sells more than IB holds minus what the stop/target already sold. Returns None if nothing was left
+        to sell (the stop or target got there first). If the position cannot be closed, the stop/target are put
+        back and ExecutionHalt is raised: a stuck exit is never silent. An order whose cancel is not confirmed
+        also raises, so two sells can never be live at once.
         """
         symbol = self.contract.symbol
         if self.broker.dry_run:
             log.info("DRY RUN: would sell %d %s", pos.shares, symbol)
             return None
-        self.cancel_protection(pos)
-        left = ib_shares(self.ib, symbol)
+        already_sold = self.cancel_protection(pos)
+        left = min(ib_shares(self.ib, symbol), pos.shares - already_sold)
         sold, proceeds = 0, 0.0
         for attempt in range(self.max_reprices + 1):
             if left <= 0:

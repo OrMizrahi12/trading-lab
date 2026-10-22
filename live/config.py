@@ -25,3 +25,6 @@ FLATTEN_BEFORE_CLOSE_MIN = 10  # wall-clock flatten deadline; the delayed bars a
 ORDER_TIMEOUT_S = 30  # how long a marketable limit may rest before it is cancelled
 LIMIT_OFFSET_PCT = 0.005  # marketable limit sits this fraction through the last known price
 EXIT_MAX_REPRICES = 3  # a stuck exit is re-priced wider this many times, then the engine halts
+
+HOLE_WAIT_MIN = 60  # a missing bar is waited for this long after it should have closed, then stepped past (entries stay blocked)
+MAX_TICK_ERRORS = 5  # consecutive failed polls (feed errors, dropped connection) before the engine halts

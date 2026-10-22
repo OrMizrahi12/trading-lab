@@ -7,7 +7,8 @@ Then the wall-clock rule: flatten before the close and never carry a position ov
 What differs from the backtester, on purpose (the bars are 15-20 minutes late):
 - stop and target rest at IB as a pair instead of being checked bar by bar;
 - a wall-clock deadline flattens before the close (the strategies' own time exit would arrive after it);
-- an entry signal older than `max_signal_age_min` is skipped (exits are never skipped).
+- an entry signal older than `max_signal_age_min` is skipped (exits are never skipped);
+- a halt (stuck exit, unexplained position, too many failed polls) stays until you restart with `clear_halt`.
 `wall_clock_rules=False` turns the last two off; the parity test uses it.
 """
 
@@ -22,9 +23,9 @@ from ib_async import Stock
 from strategies.base import Entry, Exit
 from strategies.session_clock import SessionClock
 
-from .broker import Broker
-from .config import (FLATTEN_BEFORE_CLOSE_MIN, LOOKBACK_BARS, MAX_SIGNAL_AGE_MIN, POLL_SECONDS,
-                     STATE_DIR)
+from .broker import Broker, PaperGuardError
+from .config import (FLATTEN_BEFORE_CLOSE_MIN, HOLE_WAIT_MIN, LOOKBACK_BARS, MAX_SIGNAL_AGE_MIN,
+                     MAX_TICK_ERRORS, POLL_SECONDS, STATE_DIR)
 from .execution import ExecutionHalt, Executor, utc_now
 from .feed import BAR, NY, BarFeed
 from .reconcile import ib_shares, reconcile
@@ -39,6 +40,7 @@ class Runner:
     def __init__(self, ib, name: str, symbol: str, settings: dict, *, strategy=None, dry_run: bool = False,
                  root: Path = STATE_DIR, clock=utc_now, feed: BarFeed | None = None, executor: Executor | None = None,
                  wall_clock_rules: bool = True, catch_up: int = 0, flatten_on_mismatch: bool = False,
+                 clear_halt: bool = False, hole_wait_min: int = HOLE_WAIT_MIN,
                  max_signal_age_min: int = MAX_SIGNAL_AGE_MIN, flatten_before_close_min: int = FLATTEN_BEFORE_CLOSE_MIN,
                  lookback: int = LOOKBACK_BARS, contract=None):
         self.ib, self.name, self.symbol, self.dry_run, self.clock = ib, name, symbol, dry_run, clock
@@ -52,7 +54,10 @@ class Runner:
         self.feed = feed or BarFeed(ib, self.contract, delay_log=self.dir / "bar_delay.csv", clock=clock)
         self.executor = executor or Executor(ib, self.broker, self.contract, clock=clock)
         self.wall_clock_rules, self.catch_up = wall_clock_rules, catch_up
-        self.flatten_on_mismatch = flatten_on_mismatch
+        self.flatten_on_mismatch, self.clear_halt = flatten_on_mismatch, clear_halt
+        self.hole_wait = pd.Timedelta(minutes=hole_wait_min)
+        self._last_ref: float | None = None  # newest close seen: the price an exit is built from if a poll fails
+        self._errors = 0
         self.max_signal_age = pd.Timedelta(minutes=max_signal_age_min)
         self.flatten_before_close = pd.Timedelta(minutes=flatten_before_close_min)
         self.lookback = lookback
@@ -68,30 +73,48 @@ class Runner:
         if hasattr(self.strategy, "reset"):
             self.strategy.reset()  # the backtester does this too
         res = reconcile(self.ib, self.broker, self.state)
-        if res.problems and self.flatten_on_mismatch:
+        if res.problems and self.flatten_on_mismatch and not self.dry_run:
             res = self._flatten_mismatch(res)
         if res.problems:
             self._halt("reconcile: " + "; ".join(res.problems))
             return
         if self.state.halted:
-            log.warning("start: previous halt (%s) cleared, IB and the state file agree", self.state.halted)
+            if not self.clear_halt:
+                log.error("start: halted since the last run (%s). Check IB, then restart with --clear-halt.",
+                          self.state.halted)
+                self._save()
+                return
+            log.warning("start: previous halt (%s) cleared by --clear-halt", self.state.halted)
             self.state.halted = None
-        if res.needs_protection:
-            self.executor.protect(self.state.position)
+        try:
+            if res.needs_protection:
+                self._protect_or_flatten(self.state.position, self._ref_price())
+        except ExecutionHalt as e:
+            self._halt(str(e))
+            return
         self._save()
 
+    def _ref_price(self) -> float:
+        if self._last_ref is None:
+            closed = self.feed.poll()
+            if closed.empty:
+                raise ExecutionHalt("no price to build an order from")
+            self._last_ref = float(closed["close"].iloc[-1])
+        return self._last_ref
+
     def _flatten_mismatch(self, res):
-        """The one automatic fix, only on request: sell shares IB holds that the state file cannot explain."""
+        """The one automatic fix, only on request: sell shares IB holds beyond what the state file explains.
+
+        The state's own position (and its stop) is left alone; only the excess is sold.
+        """
         held = ib_shares(self.ib, self.symbol)
-        if held <= 0 or any("not ours" in p for p in res.problems):
+        known = self.state.position.shares if self.state.position else 0
+        excess = held - known
+        if excess <= 0 or any("not ours" in p for p in res.problems):
             return res
-        log.warning("start: --flatten-on-mismatch, selling %d %s", held, self.symbol)
-        closed = self.feed.poll()
-        if closed.empty:
-            return res
-        stray = PositionState(shares=held, entry_time=self.clock().isoformat(), entry_price=0.0, stop=0.0, target=None)
-        self.executor.exit(stray, float(closed["close"].iloc[-1]))
-        self.state.position = None
+        log.warning("start: --flatten-on-mismatch, selling the %d extra %s", excess, self.symbol)
+        stray = PositionState(shares=excess, entry_time=self.clock().isoformat(), entry_price=0.0, stop=0.0, target=None)
+        self.executor.exit(stray, self._ref_price())
         return reconcile(self.ib, self.broker, self.state)
 
     def _halt(self, reason: str) -> None:
@@ -113,15 +136,32 @@ class Runner:
         if self.state.halted:
             log.error("halted, not trading: %s", self.state.halted)
             return
+        now = self.clock()
         try:
-            self._tick(self.clock())
+            self._tick(now)
+            self._errors = 0
         except ExecutionHalt as e:
             self._halt(str(e))
+        except PaperGuardError as e:
+            self._halt(f"paper guard: {e}")
+        except Exception as e:  # a failed poll (feed error, dropped connection): try again, but the deadline cannot wait
+            self._errors += 1
+            log.exception("poll failed (%d of %d): %s", self._errors, MAX_TICK_ERRORS, e)
+            try:
+                self._wall_clock_exit(self._last_ref, now)
+            except Exception as inner:
+                log.exception("wall-clock exit after a failed poll also failed: %s", inner)
+                self._halt(f"wall-clock exit failed: {inner}")
+                return
+            if self._errors >= MAX_TICK_ERRORS:
+                self._halt(f"{self._errors} failed polls in a row; last: {e}")
 
     def _tick(self, now: pd.Timestamp) -> None:
         closed = self.feed.poll()
         if closed.empty:
+            self._wall_clock_exit(self._last_ref, now)
             return
+        self._last_ref = float(closed["close"].iloc[-1])
         self._sync_position(now)
         if self.state.halted:
             return
@@ -132,11 +172,20 @@ class Runner:
             self._save()
             log.info("first run: starting after bar %s", anchor)
         last = pd.Timestamp(self.state.last_bar_ts)
+        wait_for = self._hole_to_wait_for(last, now)
         for ts in closed.index[closed.index > last]:
+            if wait_for is not None and ts > wait_for:
+                log.warning("waiting for missing bar %s before stepping %s", wait_for, ts)
+                break
             self._process_bar(closed, ts, now)
             if self.state.halted:
                 return
-        self._wall_clock_exit(closed, now)
+        self._wall_clock_exit(self._last_ref, now)
+
+    def _hole_to_wait_for(self, last: pd.Timestamp, now: pd.Timestamp) -> pd.Timestamp | None:
+        """The earliest missing bar after `last` that is still within its grace period (a late bar is not a lost one)."""
+        waiting = [h for h in self.feed.holes if h > last and now - (h + BAR) < self.hole_wait]
+        return min(waiting, default=None)
 
     def _sync_position(self, now: pd.Timestamp) -> None:
         """Has IB closed our position (stop or target) since the last poll? Remember when, for the bar stepping."""
@@ -156,7 +205,8 @@ class Runner:
     def _closing_info(self, pos: PositionState, now: pd.Timestamp) -> tuple[str, float | None, str]:
         for trade in self.ib.trades():
             oid = trade.order.orderId
-            if oid in (pos.stop_order_id, pos.target_order_id) and trade.orderStatus.status == "Filled":
+            if (oid in (pos.stop_order_id, pos.target_order_id) and trade.order.orderRef == self.tag
+                    and trade.orderStatus.status == "Filled"):
                 when = trade.fills[-1].execution.time if trade.fills else None
                 when = now if when is None else pd.Timestamp(when)
                 when = when.tz_localize("UTC") if when.tzinfo is None else when.tz_convert("UTC")
@@ -201,7 +251,10 @@ class Runner:
             st.position = PositionState(shares=fill.shares, entry_time=bar_close.isoformat(), entry_price=fill.price,
                                         stop=intent.stop, target=record["target"])
             self._save()  # the position exists at IB now: write it down before anything else can fail
-            self.executor.protect(st.position)
+            if fill.price <= intent.stop:  # the backtester drops an entry whose fill is not above the stop; so do we
+                self._abort_entry(f"filled at {fill.price}, not above the stop {intent.stop}", ref, now)
+                return
+            self._protect_or_flatten(st.position, ref, now)
             self._save()
             return
         # Exit: never skipped because it is old.
@@ -218,6 +271,28 @@ class Runner:
             self._record_trade(pos, exit_time=pd.Timestamp(when), exit_price=price, reason=why)
         st.position = None
 
+    def _protect_or_flatten(self, pos: PositionState, ref: float, now: pd.Timestamp | None = None) -> None:
+        """Rest the stop/target at IB. If that fails, sell the position at once and halt: never run unprotected."""
+        try:
+            self.executor.protect(pos)
+        except Exception as e:
+            log.error("protection failed (%s); selling the position", e)
+            self._abort_entry(f"protection failed: {e}", ref, now or self.clock())
+            self._halt(f"protection failed ({e}); the position was sold")
+
+    def _abort_entry(self, why: str, ref: float, now: pd.Timestamp) -> None:
+        """Sell what an entry just bought and forget it (logged as a trade)."""
+        pos = self.state.position
+        log.warning("entry aborted: %s", why)
+        fill = self.executor.exit(pos, ref)
+        if fill is not None:
+            self._record_trade(pos, exit_time=now, exit_price=fill.price, reason="entry_aborted", fill_time=fill.time)
+        else:
+            when, price, reason = self._closing_info(pos, now)
+            self._record_trade(pos, exit_time=pd.Timestamp(when), exit_price=price, reason=reason)
+        self.state.position = None
+        self._save()
+
     def _entry_blocked(self, now: pd.Timestamp, age: pd.Timedelta) -> str:
         if age > self.max_signal_age:
             return f"signal is {age} old"
@@ -233,7 +308,7 @@ class Runner:
         close = self.sessions.close(now.tz_convert(NY).date())
         return None if close is None else close - self.flatten_before_close
 
-    def _wall_clock_exit(self, closed: pd.DataFrame, now: pd.Timestamp) -> None:
+    def _wall_clock_exit(self, ref: float | None, now: pd.Timestamp) -> None:
         pos = self.state.position
         if not self.wall_clock_rules or pos is None or pos.closed_at or self.dry_run:
             return
@@ -242,8 +317,10 @@ class Runner:
         if not carried and (deadline is None or now < deadline):
             return
         why = "overnight" if carried else "flatten_deadline"
+        if ref is None:
+            raise ExecutionHalt(f"{why}: {pos.shares} {self.symbol} must be sold but no price is known yet")
         log.warning("wall clock: closing %d %s (%s)", pos.shares, self.symbol, why)
-        fill = self.executor.exit(pos, float(closed["close"].iloc[-1]))
+        fill = self.executor.exit(pos, ref)
         if fill is not None:
             self._record_trade(pos, exit_time=now, exit_price=fill.price, reason=why, fill_time=fill.time)
         else:

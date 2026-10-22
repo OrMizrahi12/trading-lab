@@ -33,14 +33,18 @@ def orders(ib, kind=None):
 
 # -- sizing ------------------------------------------------------------------------------
 
-def test_size_risks_one_percent_like_the_backtester():
+def test_size_never_risks_more_than_one_percent_even_at_the_price_cap():
     _, ex = make()
-    assert ex.size(Entry(stop=99.0, target=float("inf")), 100.0) == 952  # 1000 / 1.05 per share
+    entry = Entry(stop=99.0, target=float("inf"))
+    shares = ex.size(entry, 100.0)
+    assert shares == 645  # 1000 / 1.55 per share, with the fill taken at the limit cap 100.50 (+ costs)
+    worst_fill = 100.5 + 0.005 + 0.01
+    assert shares * (worst_fill - 99.0 + 0.02 + 0.015) <= 1000
 
 
 def test_size_is_capped_at_the_account_with_a_tight_stop():
     _, ex = make()
-    assert ex.size(Entry(stop=99.9, target=float("inf")), 100.0) == 999  # no leverage
+    assert ex.size(Entry(stop=99.9, target=float("inf")), 100.0) == 994  # no leverage, measured at the price cap
 
 
 def test_size_is_zero_when_the_stop_is_not_below_the_price():
@@ -118,7 +122,7 @@ def test_exit_cancels_protection_then_sells_everything():
     sell = orders(ib, "LMT")[-1]
     assert sell.action == "SELL" and sell.lmtPrice == 100.5
     assert ib.holdings["QQQ"] == 0 and ib.openTrades() == []
-    assert pos.stop_order_id is None and pos.target_order_id is None
+    assert pos.stop_order_id is not None  # ids stay, so the runner can still look up which order filled
 
 
 def test_exit_when_the_stop_already_filled_sells_nothing():
@@ -161,3 +165,71 @@ def test_dry_run_sends_nothing():
     ex.protect(pos)
     assert ex.exit(pos, 100.0) is None
     assert ib.placed == [] and pos.stop_order_id is None
+
+
+# -- races the review found ---------------------------------------------------------------
+
+def sells(ib):
+    return [o for o in orders(ib, "LMT") if o.action == "SELL"]
+
+
+def test_entry_cancel_that_is_not_confirmed_halts_instead_of_reading_it_as_unfilled():
+    ib, ex = make()
+    ib.market_price, ib.freeze, ib.slow_cancel = 100.0, True, True
+    with pytest.raises(ExecutionHalt, match="not confirmed cancelled"):
+        ex.buy(10, 100.0)
+    assert len(orders(ib)) == 1  # nothing else was sent on top
+
+
+def test_exit_never_has_two_sells_live_when_a_cancel_is_slow():
+    ib, ex = make()
+    ib.holdings["QQQ"] = 100
+    ib.market_price, ib.freeze, ib.slow_cancel = 101.0, True, True
+    with pytest.raises(ExecutionHalt, match="not confirmed cancelled"):
+        ex.exit(position(shares=100), 101.0)
+    assert len(sells(ib)) == 1
+
+
+def test_exit_halts_before_selling_if_the_stop_cancel_is_not_confirmed():
+    ib, ex = make()
+    ib.holdings["QQQ"] = 10
+    ib.market_price = 101.0
+    pos = position()
+    ex.protect(pos)
+    ib.slow_cancel = True
+    with pytest.raises(ExecutionHalt, match="not confirmed cancelled"):
+        ex.exit(pos, 101.0)
+    assert sells(ib) == []
+
+
+def test_exit_does_not_sell_shares_the_stop_already_sold_even_if_positions_lag():
+    ib, ex = make()
+    ib.holdings["QQQ"] = 10
+    ib.market_price = 101.0
+    pos = position()
+    ex.protect(pos)
+    ib.trigger(ib._trades[0], 99.0)  # the stop fills...
+    ib.holdings["QQQ"] = 10  # ...but IB's position report has not caught up yet
+    assert ex.exit(pos, 101.0) is None
+    assert sells(ib) == []
+
+
+def test_exit_of_a_stray_sells_only_its_own_shares():
+    ib, ex = make()
+    ib.holdings["QQQ"] = 150
+    ib.market_price = 101.0
+    fill = ex.exit(position(shares=50), 101.0)
+    assert fill.shares == 50 and ib.holdings["QQQ"] == 100
+
+
+def test_protection_is_good_till_cancelled_and_rejection_is_not_silent():
+    ib, ex = make()
+    pos = position(target=105.0)
+    ex.protect(pos)
+    assert {o.tif for o in orders(ib)} == {"GTC"}
+
+    ib, ex = make()
+    ib.reject_types = {"STP"}
+    with pytest.raises(ExecutionHalt, match="did not accept"):
+        ex.protect(position(target=105.0))
+    assert all(t.isDone() for t in ib._trades)  # the target that was accepted is cancelled again

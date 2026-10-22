@@ -34,6 +34,21 @@ def open_orders(ib, symbol: str):
     return [t for t in ib.openTrades() if t.contract.symbol == symbol]
 
 
+CANCEL_WAIT_S = 15
+
+
+def cancel_confirmed(ib, broker: Broker, trade, res: ReconcileResult, why: str) -> bool:
+    """Cancel one of our orders and wait until IB says it is gone. Not confirmed = a problem (never re-place on top)."""
+    broker.cancel(trade.order)
+    for _ in range(CANCEL_WAIT_S * 2):
+        if trade.isDone():
+            res.actions.append(f"cancelled order {trade.order.orderId} ({why})")
+            return True
+        ib.sleep(0.5)
+    res.problems.append(f"order {trade.order.orderId} ({why}) is not confirmed cancelled after {CANCEL_WAIT_S}s")
+    return False
+
+
 def reconcile(ib, broker: Broker, state: LiveState) -> ReconcileResult:
     res = ReconcileResult()
     shares = ib_shares(ib, state.symbol)
@@ -52,13 +67,11 @@ def reconcile(ib, broker: Broker, state: LiveState) -> ReconcileResult:
         if shares != 0:
             res.problems.append(f"State is flat but IB holds {shares} {state.symbol}")
         for t in ours:
-            broker.cancel(t.order)
-            res.actions.append(f"cancelled stale order {t.order.orderId} ({t.order.action}) while flat")
+            cancel_confirmed(ib, broker, t, res, f"stale {t.order.action} while flat")
     elif shares == 0:
         # Stop or target filled (or someone closed it) while we were away: state and IB agree again.
         for t in ours:
-            broker.cancel(t.order)
-            res.actions.append(f"cancelled leftover order {t.order.orderId}")
+            cancel_confirmed(ib, broker, t, res, "leftover after the position closed")
         res.actions.append(f"position of {pos.shares} {state.symbol} is gone at IB; state set to flat")
         state.position = None
     elif shares != pos.shares:
@@ -71,11 +84,9 @@ def reconcile(ib, broker: Broker, state: LiveState) -> ReconcileResult:
         if wanted_ok and not extra and len(wanted) == (1 if pos.target is None else 2):
             res.actions.append("position and its stop/target are in place")
         else:
-            for t in ours:  # start from a clean slate: cancel the broken remains
-                broker.cancel(t.order)
-                res.actions.append(f"cancelled order {t.order.orderId} of a broken stop/target pair")
+            confirmed = [cancel_confirmed(ib, broker, t, res, "part of a broken stop/target pair") for t in ours]
             pos.stop_order_id = pos.target_order_id = None
-            res.needs_protection = True
+            res.needs_protection = all(confirmed)  # only re-place once every old order is really gone
 
     for line in res.actions:
         log.info("reconcile: %s", line)

@@ -97,7 +97,10 @@ def save(path: Path, state: LiveState) -> None:
     """Atomic write: a crash leaves either the old file or the new one, never half of one."""
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp = path.with_suffix(".tmp")
-    tmp.write_text(state.to_json())
+    with tmp.open("w") as f:
+        f.write(state.to_json())
+        f.flush()
+        os.fsync(f.fileno())  # on disk before the rename, so a power cut cannot leave an empty state file
     os.replace(tmp, path)
 
 
@@ -111,19 +114,32 @@ def _pid_alive(pid: int) -> bool:
     return True
 
 
+def _claim(path: Path) -> None:
+    """Create the pid file, failing if it already exists (atomic: two runners cannot both succeed)."""
+    fd = os.open(path, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+    with os.fdopen(fd, "w") as f:
+        f.write(str(os.getpid()))
+
+
 @contextmanager
 def lock(directory: Path):
     """One runner per state directory. A lock left by a dead process is taken over."""
     directory.mkdir(parents=True, exist_ok=True)
     path = directory / "runner.pid"
-    if path.exists():
+    for attempt in range(2):
         try:
-            other = int(path.read_text())
-        except ValueError:
-            other = 0
-        if other and other != os.getpid() and _pid_alive(other):
-            raise StateError(f"Another runner (pid {other}) holds {path}")
-    path.write_text(str(os.getpid()))
+            _claim(path)
+            break
+        except FileExistsError:
+            try:
+                other = int(path.read_text())
+            except (ValueError, FileNotFoundError):
+                other = 0
+            if other and other != os.getpid() and _pid_alive(other):
+                raise StateError(f"Another runner (pid {other}) holds {path}") from None
+            path.unlink(missing_ok=True)  # stale: its owner is gone
+            if attempt == 1:
+                raise StateError(f"Could not take over {path}") from None
     try:
         yield
     finally:

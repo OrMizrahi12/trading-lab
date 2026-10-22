@@ -154,22 +154,37 @@ def test_no_new_entry_after_the_flatten_deadline(tmp_path):
     assert ib.placed == [] and "deadline" in lines(runner, "signals.jsonl")[0]["action"]
 
 
-def test_unexplained_position_halts_and_trades_nothing_until_fixed(tmp_path):
+def test_unexplained_position_halts_and_the_halt_survives_a_restart_until_cleared(tmp_path):
     ib, runner, _ = make(tmp_path, {"10:05": ENTRY}, f"{DAY1} 10:12", last_bar="10:00", holdings=7)
     runner.start()
     runner.tick()
     assert runner.state.halted and "IB holds 7" in runner.state.halted and ib.placed == []
 
-    ib.holdings["QQQ"] = 0  # a human flattened it; a restart finds IB and the state file agreeing again
+    ib.holdings["QQQ"] = 0  # a human flattened it; IB and the state file agree again
     again = Runner(ib, "ema_trend", "QQQ", {}, strategy=Script({}), root=tmp_path, clock=runner.clock, feed=runner.feed)
     again.start()
-    assert again.state.halted is None
+    assert again.state.halted  # a plain restart does not clear it
+    again.tick()
+    assert ib.placed == []
+
+    cleared = Runner(ib, "ema_trend", "QQQ", {}, strategy=Script({}), root=tmp_path, clock=runner.clock,
+                     feed=runner.feed, clear_halt=True)
+    cleared.start()
+    assert cleared.state.halted is None
 
 
 def test_flatten_on_mismatch_sells_the_stray_shares(tmp_path):
     ib, runner, _ = make(tmp_path, {}, f"{DAY1} 10:12", last_bar="10:00", holdings=7, flatten_on_mismatch=True)
     runner.start()
     assert ib.holdings["QQQ"] == 0 and not runner.state.halted
+
+
+def test_flatten_on_mismatch_sells_only_the_excess_and_leaves_the_state_position(tmp_path):
+    ib, runner, _ = make(tmp_path, {}, f"{DAY1} 10:12", last_bar="10:00", position=held(), holdings=17,
+                         flatten_on_mismatch=True)
+    runner.start()
+    assert ib.holdings["QQQ"] == 10 and runner.state.position.shares == 10 and not runner.state.halted
+    assert [o.totalQuantity for _, o in ib.placed if o.action == "SELL" and o.orderType == "LMT"] == [7]
 
 
 def test_stuck_exit_halts_the_engine_and_keeps_the_stop(tmp_path):
@@ -209,3 +224,91 @@ def test_state_of_other_settings_is_refused(tmp_path):
     from live.state import StateError
     with pytest.raises(StateError):
         other.start()
+
+
+def test_entry_that_fills_at_or_below_the_stop_is_sold_at_once_like_the_backtester_drops_it(tmp_path):
+    ib, runner, _ = make(tmp_path, {"10:05": ENTRY}, f"{DAY1} 10:12", last_bar="10:00")
+    ib.market_price = 98.5  # the signal close was 100 but the fill is below the 99 stop
+    runner.start()
+    runner.tick()
+    assert runner.state.position is None and ib.holdings["QQQ"] == 0 and not runner.state.halted
+    assert lines(runner, "trades.jsonl")[0]["reason"] == "entry_aborted"
+    assert not any(o.orderType == "STP" for _, o in ib.placed)
+
+
+def test_rejected_protection_sells_the_position_and_halts(tmp_path):
+    ib, runner, _ = make(tmp_path, {"10:05": ENTRY}, f"{DAY1} 10:12", last_bar="10:00")
+    ib.reject_types = {"STP"}
+    runner.start()
+    runner.tick()
+    assert runner.state.position is None and ib.holdings["QQQ"] == 0
+    assert "protection failed" in runner.state.halted
+
+
+def test_entry_cancel_not_confirmed_halts_the_runner(tmp_path):
+    ib, runner, _ = make(tmp_path, {"10:05": ENTRY}, f"{DAY1} 10:12", last_bar="10:00")
+    ib.freeze = ib.slow_cancel = True
+    runner.start()
+    runner.tick()
+    assert "not confirmed cancelled" in runner.state.halted
+    assert len(ib.placed) == 1  # no second order, no stop on top of an unknown position
+
+
+def test_a_late_bar_is_waited_for_then_stepped_past_after_the_grace_period(tmp_path):
+    bars = day_bars(DAY1, [100.0] * 20, 100.0)
+    gapped = bars.drop(bars.index[5])  # the 09:55 bar is missing
+    ib, runner, clock = make(tmp_path, {}, f"{DAY1} 10:20", bars=gapped, last_bar="09:50")
+    runner.start()
+    runner.tick()  # 20 minutes after the missing bar closed: still within the 60 minute wait
+    assert pd.Timestamp(runner.state.last_bar_ts) == at(f"{DAY1} 09:50")
+
+    clock[0] = at(f"{DAY1} 11:10")  # 70 minutes: give up waiting
+    runner.tick()
+    assert pd.Timestamp(runner.state.last_bar_ts) == at(f"{DAY1} 11:05")
+
+
+def test_failed_polls_are_retried_then_halt(tmp_path):
+    ib, runner, _ = make(tmp_path, {}, f"{DAY1} 10:12", last_bar="10:00")
+    runner.start()
+
+    def boom(*a):
+        raise RuntimeError("farm down")
+
+    runner.feed.fetch = boom
+    for _ in range(4):
+        runner.tick()
+    assert runner.state.halted is None
+    runner.tick()
+    assert "5 failed polls" in runner.state.halted
+
+
+def test_the_deadline_is_met_even_when_the_poll_fails_or_comes_back_empty(tmp_path):
+    for failure in (RuntimeError("farm down"), None):
+        ib, runner, clock = make(tmp_path / str(failure), {}, f"{DAY1} 15:40", last_bar="15:30", position=held(),
+                                 holdings=10)
+        runner.start()
+        runner.tick()  # a good poll first: the engine now knows a price
+        assert runner.state.position is not None
+        clock[0] = at(f"{DAY1} 15:55")
+        if failure:
+            def boom(*a):
+                raise failure
+            runner.feed.fetch = boom
+        else:
+            runner.feed.fetch = lambda *a: BARS.iloc[0:0]
+        runner.tick()
+        assert runner.state.position is None and ib.holdings["QQQ"] == 0
+
+
+def test_an_exit_that_loses_the_race_to_the_stop_is_logged_as_the_stop(tmp_path):
+    ib, runner, _ = make(tmp_path, {"10:05": Exit("time")}, f"{DAY1} 10:12", last_bar="10:00", position=held(),
+                         holdings=10)
+    runner.start()
+    ib.now = at(f"{DAY1} 10:12")
+    ib.trigger(ib._trades[0], 98.9)  # the stop fills just before our exit...
+    ib.holdings["QQQ"] = 10  # ...and IB's position report lags
+    runner.state.position.closed_at = None
+    runner.tick()
+    trade = lines(runner, "trades.jsonl")[0]
+    assert trade["reason"] == "stop" and trade["exit_price"] == 98.9
+    assert [o for _, o in ib.placed if o.action == "SELL" and o.orderType == "LMT"] == []

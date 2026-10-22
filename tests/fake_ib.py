@@ -33,6 +33,8 @@ class FakeIB:
         self.market_price = None  # a marketable limit fills at this price; None = nothing fills
         self.fill_fraction = 1.0  # share of a marketable order that fills (partial fills)
         self.fractions = []  # per-order fill shares for the next marketable orders (consumed first)
+        self.slow_cancel = False  # True: a cancel is never confirmed (status stays PendingCancel)
+        self.reject_types = set()  # order types IB rejects, e.g. {"STP"}
         self.freeze = False  # True: no order ever fills (timeout tests)
         self.now = None  # time stamped on fills
         self.errorEvent = Event()
@@ -70,7 +72,8 @@ class FakeIB:
         return [t for t in self._trades if not t.isDone()]
 
     def accountSummary(self, account=""):
-        return [SimpleNamespace(tag="NetLiquidation", value=str(self.net_liquidation), currency="USD")]
+        return [SimpleNamespace(account=self.accounts[0], tag="NetLiquidation", value=str(self.net_liquidation),
+                                currency="USD")]
 
     def qualifyContracts(self, *contracts):
         return list(contracts)
@@ -82,12 +85,15 @@ class FakeIB:
         self.placed.append((contract, order))
         trade = FakeTrade(contract, order)
         self._trades.append(trade)
+        if getattr(order, "orderType", "") in self.reject_types:
+            trade.orderStatus.status = "Inactive"
+            return trade
         self._try_fill(trade)
         return trade
 
     def _try_fill(self, trade):
         order, px = trade.order, self.market_price
-        if self.freeze or px is None or order.orderType != "LMT":
+        if self.freeze or px is None or getattr(order, "orderType", "") != "LMT":
             return
         crosses = order.lmtPrice >= px if order.action == "BUY" else order.lmtPrice <= px
         if crosses and not getattr(order, "ocaGroup", ""):  # a resting target is filled by trigger()
@@ -119,4 +125,4 @@ class FakeIB:
         self.cancelled.append(order)
         for t in self._trades:
             if t.order is order or t.order.orderId == order.orderId:
-                t.orderStatus.status = "Cancelled"
+                t.orderStatus.status = "PendingCancel" if self.slow_cancel else "Cancelled"
