@@ -1,0 +1,71 @@
+# The lab's standards: what a strategy must show before we take it seriously.
+# Read by judge/scorecard.py. Change a number here, not in the code, and say why in the commit.
+# Paper research only. Nothing here is financial advice.
+#
+# A rule is a pass/fail threshold. A test setting says HOW a number is measured. Keep them apart:
+# loosening a test setting (fewer trials, fewer versions) makes the judge faster but weaker.
+
+rules:
+  # 1. Enough trades. Fewer than this and every other number is mostly noise: the standard error of
+  #    an average trade shrinks with the square root of the count, and 200 is where a typical
+  #    intraday edge (a few hundredths of a percent per trade) starts to separate from zero.
+  min_trades: 200
+
+  # 2. Sharpe after costs (return per unit of day-to-day swing, yearly, 0% risk-free), full data,
+  #    usual commission + spread + slippage. 1.0 is the textbook "decent" line. Costs are already in,
+  #    so there is no extra haircut here; the later rules do the doubting.
+  min_sharpe: 1.0
+
+  # 3. Walk-forward (tune on 6 months, trade the next 2, roll; the traded months are never seen by
+  #    the tuning). Out-of-sample Sharpe must stay at least half the bar in rule 2: some decay is
+  #    normal, a collapse means the tuning was fitting noise.
+  min_walk_forward_sharpe: 0.5
+
+  # 4. Monte Carlo drawdown. Reshuffle the real trades 5,000 times; the 5th-percentile max drawdown
+  #    is the bad-luck case (1 reshuffle in 20 is worse). It may not be worse than 20% of the
+  #    account: with 1% risk a trade, a 20% hole is a long losing streak, and the point where most
+  #    people would stop trading the plan. Stored as a negative fraction.
+  max_drawdown_p5: -0.20
+
+  # 5. Break-even cost multiple: how many times the usual costs the strategy can pay before net profit
+  #    hits zero. 2x means a wider spread, worse fills or a pricier broker cannot kill it. Real
+  #    costs are the one thing a backtest guesses at, so we ask for room.
+  min_break_even_multiple: 2.0
+
+  # 6. Deflated Sharpe Ratio: the probability the true Sharpe is above zero after allowing for how
+  #    many settings were tried (the luckiest of N tries looks good by chance), the short data and
+  #    the shape of the returns. 0.95 is the usual 5% significance level.
+  min_deflated_sharpe: 0.95
+
+  # 7. Parameter noise: nudge every setting a little at random and rerun. If the strategy only
+  #    works at the exact chosen numbers it is a peak, not a plateau. At least 80% of the nudged
+  #    versions must still make money after costs.
+  min_noise_profitable_share: 0.80
+
+tests:
+  # DSR needs to know how many settings the research tried. The research loop should pass the real
+  # count (--trials). This is the fallback when it does not: a guess, and the scorecard says so.
+  assumed_trials: 100
+
+  walk_forward:
+    tune_months: 6          # same shape as backtests/walk_forward.py
+    trade_months: 2
+    optuna_trials: 12       # per window; 5 random first, then Optuna's TPE guides
+    optuna_startup: 5
+    min_trades_per_tune: 25 # a tuning trial under this many trades is ignored
+    seed: 7
+
+  monte_carlo:
+    draws: 5000
+    percentile: 5
+    seed: 42
+
+  cost_sweep:
+    multiples: [0, 2, 3, 5] # plus the usual (1x) from the main run; break-even is interpolated
+                            # between neighbours, and reads "above 5x" if profit never turns negative
+
+  noise:
+    versions: 40            # the research report used 200; 40 is enough to read a share to +-7%
+    relative: 0.25          # each tunable setting moves by up to +-25%, rounded to its step
+    last_entry_minutes: 20  # last-entry time moves by up to +-20 minutes
+    seed: 11
