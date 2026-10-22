@@ -4,6 +4,7 @@ import math
 import sys
 import time
 
+import pandas as pd
 from ib_async import IB, Forex, LimitOrder, MarketOrder, Stock, StopOrder
 
 HOST = "127.0.0.1"
@@ -162,11 +163,23 @@ def followup(ib):
     show_state(ib)
 
 
+def bar_price(ib, contract):
+    """Reference price from the last 5-minute bar's close, for when quotes do not reach the API."""
+    bars = ib.reqHistoricalData(contract, "", "1 D", "5 mins", "TRADES", useRTH=True, formatDate=2)
+    if not bars:
+        raise RuntimeError("No historical SPY bars available")
+    last = bars[-1]
+    age = (pd.Timestamp.now(tz="UTC") - pd.Timestamp(last.date).tz_convert("UTC")).total_seconds() / 60
+    print(f"SPY reference price {last.close} = close of the last 5-minute bar (start {last.date}, "
+          f"{age:.0f} min ago), NOT a live quote")
+    return last.close
+
+
 def tws_demo(ib):
     """TWS paper walk-through: what-if, a resting limit buy that we cancel, then a marketable limit round trip."""
     spy = Stock("SPY", "SMART", "USD")
     ib.qualifyContracts(spy)
-    price = market_price(ib, spy)
+    price = bar_price(ib, spy)
 
     print("\n1) What-if market buy (places nothing)")
     s = ib.whatIfOrder(spy, MarketOrder("BUY", QTY, tif="DAY"))
