@@ -1,0 +1,2 @@
+time,commit,strategy,symbol,settings
+2026-10-22T06:00:14+00:00,4627df0aa77e21050cff9b34349199e51df2c53e,donchian_breakout,SPY,"{""atr_multiple"": 2.0, ""atr_period"": 14, ""calendar"": ""XNYS"", ""channel_bars"": 20, ""first_signal"": ""09:45:00"", ""flatten_minutes_before_close"": 5, ""last_entry_minutes_before_close"": 30, ""no_entry_from"": null, ""no_entry_until"": null, ""timezone"": ""America/New_York""}"

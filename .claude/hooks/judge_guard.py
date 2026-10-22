@@ -4,7 +4,8 @@
 An agent told to "find profit" can reach it by loosening the judge instead of
 finding an edge (Goodhart's law). So this hook blocks:
 
-- changing the judge: anything under judge/, plus the files that hold this lock
+- changing the judge: anything under judge/, its two records (research/trials.csv, the trial ledger,
+  and research/audit_log.jsonl, the audit log) and the files that hold this lock
   (.claude/settings.json, .claude/settings.local.json, this hook);
 - touching the holdout: data/holdout/ is the last six months of bars, kept out
   of the cache so research never sees them. Reading, listing or writing it is blocked;
@@ -26,12 +27,14 @@ import re
 import sys
 from pathlib import Path
 
-LOCKED_JUDGE = ("judge", ".claude/settings.json", ".claude/settings.local.json", ".claude/hooks/judge_guard.py")
+LOCKED_JUDGE = ("judge", "research/trials.csv", "research/audit_log.jsonl",
+                ".claude/settings.json", ".claude/settings.local.json", ".claude/hooks/judge_guard.py")
 LOCKED_HOLDOUT = "data/holdout"
 EDIT_TOOLS = {"Edit": "file_path", "Write": "file_path", "NotebookEdit": "notebook_path"}
 
 JUDGE_REF = re.compile(
-    r"(?<![\w.-])judge(?=[/\s'\"]|$)|\.claude/(?:settings(?:\.local)?\.json|hooks/judge_guard\.py)"
+    r"(?<![\w.-])judge(?=[/\s'\"]|$)|research/(?:trials\.csv|audit_log\.jsonl)"
+    r"|\.claude/(?:settings(?:\.local)?\.json|hooks/judge_guard\.py)"
 )
 # data/holdout, data', 'holdout and Path("data")/"holdout" all match
 HOLDOUT_CODE = re.compile(r"""data['"\s)]*[/,]\s*['"]?holdout""", re.I)
@@ -111,6 +114,39 @@ def judge_ref_allowed(segment: str) -> bool:
     return words[0] in READ_ONLY
 
 
+def split_segments(text: str) -> list[str]:
+    """Split a shell command at ; & | newline ( ) and backticks, but not inside quotes.
+
+    Command substitution still runs inside double quotes, so `$(` and a backtick split there too.
+    """
+    segs, cur, quote, i = [], [], None, 0
+    while i < len(text):
+        ch = text[i]
+        if ch == "\\" and quote != "'" and i + 1 < len(text):  # an escaped character is never a separator or quote
+            cur.append(text[i:i + 2])
+            i += 2
+            continue
+        if quote == '"' and (ch == "`" or text.startswith("$(", i)):
+            segs.append("".join(cur))
+            cur = []
+            i += 1 if ch == "`" else 2
+            continue
+        if quote:
+            quote = None if ch == quote else quote
+            cur.append(ch)
+        elif ch in "'\"":
+            quote = ch
+            cur.append(ch)
+        elif ch in ";&|\n()`":
+            segs.append("".join(cur))
+            cur = []
+        else:
+            cur.append(ch)
+        i += 1
+    segs.append("".join(cur))
+    return segs
+
+
 def check_bash(cmd: str) -> int:
     text = strip_commit_message(cmd)
     hit = holdout_in_text(text)
@@ -119,7 +155,7 @@ def check_bash(cmd: str) -> int:
     if "judge.scorecard" in text and re.search(r"--standards\b", text):
         return block(JUDGE_MSG.format(what="running the scorecard against another standards file",
                                       target="--standards"))
-    for seg in re.split(r"[;&|\n]+|\$\(|`|\(|\)", text):
+    for seg in split_segments(text):
         m = JUDGE_REF.search(seg)
         if m and not judge_ref_allowed(seg):
             return block(JUDGE_MSG.format(what="this command", target=m.group(0).strip("'\" ")))

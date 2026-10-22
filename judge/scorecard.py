@@ -13,8 +13,12 @@ and reports/luck_vs_skill.py, made strategy-agnostic and cut down so one run tak
 every backtest (main run, cost sweep, noise versions, walk-forward tuning) goes into one process pool.
 
 From code: `scorecard(name, symbol, settings, trials=...)` returns {"passed": bool, "rules": [...], ...}.
-The CLI exits 1 when any rule fails. `trials` is how many settings the research tried before these;
-the Deflated Sharpe needs it, so a research loop should pass the real count.
+The CLI exits 1 when any rule fails. `trials` is how many settings the research says it tried; the
+Deflated Sharpe needs it. It is a claim, not the truth: every run is also written to the trial ledger
+(research/trials.csv, one row per run) and the Deflated Sharpe uses the larger of the claim and the
+number of distinct (symbol, settings) rows the ledger holds for that strategy, so `trials` can only raise
+the count. Every run, finished or crashed, appends one line to research/audit_log.jsonl (time, git commit,
+command, settings, seeds, trial counts, result). Both files are append-only and locked against the agent.
 
 To judge a new strategy add it to STRATEGIES with the settings Optuna may tune and their ranges.
 
@@ -23,14 +27,19 @@ Paper research only. Nothing here touches a broker. Nothing here is financial ad
 
 import argparse
 import ast
+import csv
+import fcntl
+import hashlib
+import json
 import os
 import re
+import subprocess
 import sys
 import time as clock
 import warnings
 from concurrent.futures import ProcessPoolExecutor
 from dataclasses import dataclass, replace
-from datetime import time
+from datetime import datetime, time, timezone
 from math import e, sqrt
 from pathlib import Path
 from statistics import NormalDist
@@ -51,7 +60,9 @@ from strategies.opening_range_breakout import OpeningRangeBreakout, OpeningRange
 from strategies.vwap_stretch_reversion import VwapStretchReversion, VwapStretchReversionParams
 
 STANDARDS = Path(__file__).with_name("standards.yaml")
-ANN = sqrt(TRADING_DAYS)
+RESEARCH = Path(__file__).resolve().parent.parent / "research"  # holds trials.csv and audit_log.jsonl
+LEDGER_FIELDS = ["time", "commit", "strategy", "symbol", "settings"]
+ANN =sqrt(TRADING_DAYS)
 EULER = 0.5772156649015329
 NORM = NormalDist()
 
@@ -88,6 +99,73 @@ class Rule:
 
 def load_standards(path: Path = STANDARDS) -> dict:
     return yaml.safe_load(path.read_text())
+
+
+# ---- trial ledger and audit log ----
+
+def settings_key(name: str, settings: dict) -> str:
+    """Canonical text for a setting set with the strategy's defaults filled in, so `--set x=<default>` and no flag match."""
+    params = STRATEGIES[name].params
+    full = {f: getattr(params(), f) for f in params.__dataclass_fields__} | settings
+    return json.dumps(full, sort_keys=True, default=str)
+
+
+def git_state(root: Path = RESEARCH.parent) -> dict:
+    """Current commit and whether the code differs from it (the two research files this module writes don't count)."""
+    def git(*args: str) -> str:
+        return subprocess.run(["git", *args], cwd=root, capture_output=True, text=True, check=True).stdout
+    try:
+        dirty = git("status", "--porcelain", "--", ".", ":(exclude)research/trials.csv", ":(exclude)research/audit_log.jsonl")
+        return {"commit": git("rev-parse", "HEAD").strip(), "dirty": bool(dirty.strip())}
+    except (OSError, subprocess.CalledProcessError):
+        return {"commit": "unknown", "dirty": None}
+
+
+def committed_ledger_rows(path: Path, root: Path = RESEARCH.parent) -> int:
+    """Data rows of the ledger as committed at HEAD (0 if it is not committed yet or git is missing)."""
+    try:
+        text = subprocess.run(["git", "show", f"HEAD:{path.resolve().relative_to(root.resolve()).as_posix()}"],
+                              cwd=root, capture_output=True, text=True, check=True).stdout
+    except (OSError, subprocess.CalledProcessError, ValueError):
+        return 0
+    return max(len(text.splitlines()) - 1, 0)
+
+
+def record_trial(path: Path, strategy: str, symbol: str, settings: str, commit: str, root: Path = RESEARCH.parent) -> int:
+    """Append this run to the ledger; return how many distinct (symbol, settings) rows `strategy` has, this run included.
+
+    Written before the backtests start, so a run that is stopped or crashes still counts. Refuses to run if the file
+    has fewer rows than the committed one (someone deleted trials).
+    """
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with open(path, "a+", newline="") as f:
+        fcntl.flock(f, fcntl.LOCK_EX)  # parallel runs queue up here
+        f.seek(0)
+        rows = list(csv.DictReader(f))
+        if len(rows) < committed_ledger_rows(path, root):
+            raise RuntimeError(f"{path} has {len(rows)} rows but the committed copy has more: trials were removed. "
+                               "Restore it (git checkout) before judging anything.")
+        writer = csv.DictWriter(f, LEDGER_FIELDS)
+        if os.fstat(f.fileno()).st_size == 0:
+            writer.writeheader()
+        row = {"time": datetime.now(timezone.utc).isoformat(timespec="seconds"), "commit": commit,
+               "strategy": strategy, "symbol": symbol, "settings": settings}
+        writer.writerow(row)
+        f.flush()
+    return len({(r["symbol"], r["settings"]) for r in rows + [row] if r.get("strategy") == strategy})
+
+
+def effective_trials(claimed: int | None, assumed: int, ledger: int) -> tuple[int, str]:
+    """(trial count the Deflated Sharpe uses, where it came from). The ledger can raise the count, nothing lowers it."""
+    asked, basis = (claimed, "claimed") if claimed is not None else (assumed, "assumed")
+    return (ledger, "ledger") if ledger > asked else (asked, basis)
+
+
+def append_audit(path: Path, record: dict) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with open(path, "a") as f:
+        fcntl.flock(f, fcntl.LOCK_EX)
+        f.write(json.dumps(record, default=str) + "\n")
 
 
 def bars_for(symbol: str) -> pd.DataFrame:
@@ -216,11 +294,33 @@ def walk_forward(name: str, symbol: str, settings: dict, windows: list[dict], pi
 
 
 def scorecard(name: str, symbol: str, settings: dict, standards: dict | None = None, trials: int | None = None,
-              log=lambda s: print(s, file=sys.stderr, flush=True)) -> dict:
-    t0 = clock.time()
+              log=lambda s: print(s, file=sys.stderr, flush=True), research_dir: Path = RESEARCH) -> dict:
+    """Judge one strategy. Logs the run in the trial ledger first, runs the battery, then writes the audit line."""
     std = standards or load_standards()
+    git = git_state(research_dir.parent)
+    in_ledger = record_trial(research_dir / "trials.csv", name, symbol, settings_key(name, settings), git["commit"],
+                             research_dir.parent)
+    n_trials, basis = effective_trials(trials, std["tests"]["assumed_trials"], in_ledger)
+    audit = {"time": datetime.now(timezone.utc).isoformat(timespec="seconds"), **git, "command": " ".join(sys.argv),
+             "strategy": name, "symbol": symbol, "settings": settings,
+             "seed": {k: v["seed"] for k, v in std["tests"].items() if isinstance(v, dict) and "seed" in v},
+             "standards_sha256": hashlib.sha256(json.dumps(std, sort_keys=True, default=str).encode()).hexdigest(),
+             "trials": {"claimed": trials, "assumed": std["tests"]["assumed_trials"], "ledger": in_ledger,
+                        "used": n_trials, "basis": basis}}
+    try:
+        card = _evaluate(name, symbol, settings, std, n_trials, basis, log)
+    except BaseException as exc:  # a crashed or interrupted run is still a run
+        append_audit(research_dir / "audit_log.jsonl", {**audit, "result": {"error": repr(exc)}})
+        raise
+    append_audit(research_dir / "audit_log.jsonl", {**audit, "result": {
+        "passed": card["passed"], "seconds": round(card["seconds"], 1),
+        "rules": [{"name": r.name, "value": r.value, "needs": r.needs, "passed": r.passed} for r in card["rules"]]}})
+    return card
+
+
+def _evaluate(name: str, symbol: str, settings: dict, std: dict, n_trials: int, basis: str, log) -> dict:
+    t0 = clock.time()
     rules_cfg, tests = std["rules"], std["tests"]
-    n_trials = trials if trials is not None else tests["assumed_trials"]
     bars = bars_for(symbol)
     wf, mc, sweep_cfg, noise_cfg = tests["walk_forward"], tests["monte_carlo"], tests["cost_sweep"], tests["noise"]
     windows = make_windows(bars)
@@ -278,7 +378,7 @@ def scorecard(name: str, symbol: str, settings: dict, standards: dict | None = N
              + ", ".join(f"${sweep[k]:,.0f}" for k in sorted(sweep))),
         Rule("Deflated Sharpe", f"{dsr:.1%}", f">= {rules_cfg['min_deflated_sharpe']:.0%}",
              dsr >= rules_cfg["min_deflated_sharpe"],
-             f"after {n_trials} trials{' (assumed)' if trials is None else ''}, bar to beat {star:.2f}"),
+             f"after {n_trials} trials ({basis}), bar to beat {star:.2f}"),
         Rule("Parameter noise", f"{share:.0%}", f">= {rules_cfg['min_noise_profitable_share']:.0%}",
              share >= rules_cfg["min_noise_profitable_share"],
              f"{int((noise.net_profit > 0).sum())} of {len(noise)} nudged versions profitable, "
@@ -323,7 +423,8 @@ def main() -> None:
     ap.add_argument("strategy", choices=sorted(STRATEGIES))
     ap.add_argument("--symbol", default="SPY")
     ap.add_argument("--set", action="append", default=[], metavar="NAME=VALUE", help="a strategy setting; repeat for several")
-    ap.add_argument("--trials", type=int, help="how many settings the research tried (default: assumed_trials in standards.yaml)")
+    ap.add_argument("--trials", type=int, help="how many settings the research tried (default: assumed_trials in standards.yaml); "
+                    "the judge uses the larger of this and its own count in research/trials.csv")
     ap.add_argument("--standards", type=Path, default=STANDARDS)
     args = ap.parse_args()
     settings = {k: parse_value(v) for k, v in (s.split("=", 1) for s in args.set)}

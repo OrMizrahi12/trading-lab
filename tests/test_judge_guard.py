@@ -41,7 +41,8 @@ def assert_blocked(r, word):
 @pytest.mark.parametrize("tool", ["Edit", "Write"])
 @pytest.mark.parametrize("rel", ["judge/standards.yaml", "judge/scorecard.py", "judge/new_rule.py",
                                  ".claude/settings.json", ".claude/settings.local.json",
-                                 ".claude/hooks/judge_guard.py"])
+                                 ".claude/hooks/judge_guard.py", "research/trials.csv",
+                                 "research/audit_log.jsonl"])
 def test_edit_or_write_of_the_judge_is_blocked(root, tool, rel):
     assert_blocked(run(root, tool, file_path=str(root / rel)), "judge")
 
@@ -90,6 +91,17 @@ def test_reading_the_judge_is_allowed(root):
     "rm .claude/hooks/judge_guard.py",
     "cat judge/standards.yaml && cp /tmp/a judge/standards.yaml",
     "uv run -m judge.scorecard orb --standards /tmp/weak.yaml",
+    # the trial ledger and audit log are append-only records written by the judge itself
+    "sed -i '$d' research/trials.csv",
+    "echo 'x' > research/trials.csv",
+    "truncate -s 0 research/audit_log.jsonl",
+    "rm research/trials.csv",
+    "grep -v orb research/trials.csv | tee research/trials.csv",
+    # quoting must not hide a write: command substitution runs inside double quotes
+    "echo \"$(cp /tmp/a judge/standards.yaml)\"",
+    "echo \"`cp /tmp/a judge/standards.yaml`\"",
+    "cat 'a;b' && cp /tmp/a judge/standards.yaml",
+    "grep \"a\\|b\" judge/standards.yaml > judge/other.yaml",
 ])
 def test_bash_that_changes_the_judge_is_blocked(root, cmd):
     r = bash(root, cmd)
@@ -106,6 +118,16 @@ def test_bash_that_changes_the_judge_is_blocked(root, cmd):
     "git add judge/standards.yaml .claude/settings.json",
     "uv run -m judge.scorecard opening_range_breakout --symbol QQQ --trials 42",
     "uv run pytest tests/test_scorecard.py",
+    # a separator inside quotes (a regex alternation) is not a separator
+    "grep -n \"min_\\|threshold\\|trades\" judge/standards.yaml",
+    "grep -E \"min_|max_\" judge/standards.yaml",
+    "grep -n 'a;b' judge/standards.yaml",
+    "grep -c '(a)' judge/scorecard.py",
+    # the records can be read, tailed and committed
+    "cat research/trials.csv",
+    "tail -n 5 research/audit_log.jsonl",
+    "wc -l research/trials.csv",
+    "git add research/trials.csv research/audit_log.jsonl",
     "git commit -m \"judge: tighten judge/standards.yaml thresholds\"",
     "git commit -m \"$(cat <<'EOF'\nresearch: edits judge/standards.yaml? no\n\nsee data/holdout/\nEOF\n)\"",
 ])

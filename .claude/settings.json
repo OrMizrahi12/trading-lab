@@ -43,6 +43,8 @@
       "Bash(git push --force:*)",
       "Bash(git push -f:*)",
       "Edit(./judge/**)",
+      "Edit(./research/trials.csv)",
+      "Edit(./research/audit_log.jsonl)",
       "Edit(./.claude/settings.json)",
       "Edit(./.claude/settings.local.json)",
       "Edit(./.claude/hooks/judge_guard.py)",
