@@ -38,6 +38,7 @@ Top-level scripts (`market_data.py`, `scanner.py`, `orders.py`, ...) are one-off
 - `backtests/reversion_comparison.py`: runs both reversion strategies on SPY and QQQ 5min at zero, usual and double costs (12 runs, `CostModel` scaled) and prints one table (`uv run -m backtests.reversion_comparison`, a few minutes).
 - `backtests/metrics.py`: `compute_metrics(trades, equity, start_equity)` gives net profit, CAGR, Sharpe, Sortino (daily returns, 0% risk-free, 252 days), max drawdown, profit factor, expectancy, win rate, average R, exposure and trade count; `METRICS` holds each one's label and plain-English explanation. Tests: `tests/test_metrics.py`.
 - `reports/spy_vwap_reclaim.py`: runs the engine and writes `reports/spy_vwap_reclaim.html` (metrics, equity curve, drawdown, monthly returns, trade list; `uv run -m reports.spy_vwap_reclaim`, about a minute). `reports/*.html` is gitignored.
+- `reports/reversion_by_day_type.py`: splits both reversion strategies' trades (SPY and QQQ 5min, usual costs) into trend days (the third of sessions with the biggest open-to-close move, per symbol) vs. other days and writes `reports/reversion_by_day_type.html` (`uv run -m reports.reversion_by_day_type`, a few minutes). Trend days are picked with hindsight, so this shows where the edge goes, not a tradable filter.
 - `notebooks/`: exploratory Jupyter notebooks.
 
 
