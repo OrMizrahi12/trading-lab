@@ -236,3 +236,66 @@ def test_the_reject_probe_reports_one_refusal_with_ibs_code_and_no_retry():
     text = "\n".join(lines)
     assert "REFUSED BY IB" in text and "[110]" in text and "orders sent by this run: 1" in text
     assert [o.lmtPrice for _, o in ib.placed] == [685.805]
+
+
+# -- the drop shows up as an exception from ib.sleep (what the real Gateway did) -------------------------------
+
+def test_a_drop_during_the_poll_sleep_is_caught_and_goes_through_the_reconnect_path(tmp_path):
+    ib, runner, calls = dropping(tmp_path)
+    runner._fallback_sleep = lambda s: None
+    sleeps = []
+
+    def sleep(seconds):
+        sleeps.append(seconds)
+        if len(sleeps) == 1:  # the poll sleep after the first tick: the socket goes away under it
+            ib.connected = False
+            raise ConnectionError("Socket disconnect")
+        return True
+
+    ib.sleep = sleep
+    ticks = []
+    real = runner.tick
+
+    def tick():
+        ticks.append(1)
+        real()
+        if len(ticks) == 3:
+            (tmp_path / "STOP").write_text("end of test")  # ends the loop
+
+    runner.tick = tick
+    runner.run()  # must not raise
+    assert calls == [1] and len(ticks) == 4 and not runner.state.halted
+    assert ib.isConnected()
+
+
+def test_the_rest_of_an_interrupted_wait_is_not_skipped_so_retries_do_not_spin(tmp_path):
+    ib, runner, _ = dropping(tmp_path)
+    waited = []
+    runner._fallback_sleep = waited.append
+    ib.sleep = lambda s: (_ for _ in ()).throw(ConnectionError("Socket disconnect"))
+    runner._pause(60)
+    assert len(waited) == 1 and 59 < waited[0] <= 60
+
+
+def test_failing_reconnects_whose_waits_also_raise_still_end_in_a_clean_halt(tmp_path):
+    ib, runner, calls = dropping(tmp_path, fail=99, reconnect_attempts=3)
+    runner._fallback_sleep = lambda s: None
+    runner.start()
+    ib.connected = False
+    ib.sleep = lambda s: (_ for _ in ()).throw(ConnectionError("Socket disconnect"))
+    runner.tick()
+    assert len(calls) == 3 and "3 reconnect attempts failed" in runner.state.halted
+
+
+def test_a_second_drop_while_reconciling_after_a_reconnect_is_a_failed_poll_not_a_crash(tmp_path):
+    ib, runner, calls = dropping(tmp_path)
+    runner.start()
+    ib.connected = False
+    real = ib.reqAllOpenOrders
+    ib.reqAllOpenOrders = lambda: (_ for _ in ()).throw(ConnectionError("Socket disconnect"))
+    runner.tick()  # reconnect works, the reconcile right after it hits the drop again
+    assert not runner.state.halted and runner._errors == 1
+    ib.reqAllOpenOrders = real
+    ib.connected = False
+    runner.tick()  # and the next loop reconnects again
+    assert len(calls) == 2 and runner._errors == 0

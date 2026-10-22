@@ -15,6 +15,7 @@ What differs from the backtester, on purpose (the bars are 15-20 minutes late):
 import json
 import logging
 import math
+import time
 from pathlib import Path
 
 import pandas as pd
@@ -69,6 +70,7 @@ class Runner:
         self.state: LiveState | None = None
         self.stop_file = stop_path(root)
         self.reconnect, self.reconnect_attempts, self.reconnect_wait_s, self.port = reconnect, reconnect_attempts, reconnect_wait_s, port
+        self._fallback_sleep = time.sleep  # tests replace it; see _pause
         self.stopped = False  # the STOP file was seen: nothing more is done until it is removed
 
     # -- start ---------------------------------------------------------------------------
@@ -176,6 +178,17 @@ class Runner:
             self._save()
         return True
 
+    def _pause(self, seconds: float) -> None:
+        """Wait `seconds` through IB's event loop. A dropped connection makes `ib.sleep` raise ConnectionError
+        ("Socket disconnect") right there: that is the signal to reconnect on the next loop, not a crash. If the
+        sleep ended early because of it, the rest of the wait is spent here, so retries do not spin."""
+        started = time.monotonic()
+        try:
+            self.ib.sleep(seconds)
+        except (ConnectionError, OSError) as e:
+            log.warning("connection error while waiting (%s: %s); reconnecting on the next loop", type(e).__name__, e)
+            self._fallback_sleep(max(0.0, seconds - (time.monotonic() - started)))
+
     def _ensure_connected(self) -> None:
         """The API connection dropped: get it back, then trust nothing from before the drop.
 
@@ -198,7 +211,7 @@ class Runner:
             except Exception as e:
                 log.warning("reconnect attempt %d of %d failed: %s", attempt, self.reconnect_attempts, e)
                 say(f"CONNECTION: attempt {attempt} of {self.reconnect_attempts} failed ({type(e).__name__}: {e})")
-                self.ib.sleep(self.reconnect_wait_s)
+                self._pause(self.reconnect_wait_s)
         else:
             self._halt(f"connection to IB lost and {self.reconnect_attempts} reconnect attempts failed")
             return
@@ -225,11 +238,11 @@ class Runner:
         if self.state.halted:
             log.error("halted, not trading: %s", self.state.halted)
             return
-        self._ensure_connected()
-        if self.state.halted:
-            return
         now = self.clock()
         try:
+            self._ensure_connected()  # inside the try: a second drop while reconciling is a failed poll, not a crash
+            if self.state.halted:
+                return
             self._tick(now)
             self._errors = 0
         except ExecutionHalt as e:
@@ -240,7 +253,8 @@ class Runner:
             self._errors += 1
             log.exception("poll failed (%d of %d): %s", self._errors, MAX_TICK_ERRORS, e)
             try:
-                self._wall_clock_exit(self._last_ref, now)
+                if self.ib.isConnected():  # with no connection nothing can be sold; the next loop reconnects first
+                    self._wall_clock_exit(self._last_ref, now)
             except Exception as inner:
                 log.exception("wall-clock exit after a failed poll also failed: %s", inner)
                 self._halt(f"wall-clock exit failed: {inner}")
@@ -486,7 +500,7 @@ class Runner:
                     self.tick()
                     if once or self.state.halted or self.stopped:
                         break
-                    self.ib.sleep(POLL_SECONDS)
+                    self._pause(POLL_SECONDS)
             except StopFileError as e:
                 self.stopped = True
                 log.error("%s", e)
