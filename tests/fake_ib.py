@@ -118,7 +118,8 @@ class FakeIB:
         return trade
 
     def _reject(self, trade, code, text):
-        trade.orderStatus.status = "Inactive"
+        # Seen on the real paper Gateway: ib_async reports error 110 (bad price increment) as Cancelled, not Inactive.
+        trade.orderStatus.status = "Cancelled" if code == 110 else "Inactive"
         self.errorEvent.emit(trade.order.orderId, code, text, trade.contract)
         return trade
 

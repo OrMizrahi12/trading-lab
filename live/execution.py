@@ -134,7 +134,7 @@ class Executor:
                 raise ExecutionHalt(f"{action} order {order.orderId} is not confirmed cancelled after "
                                     f"{CANCEL_WAIT_S}s; check IB before trading")
         filled = int(trade.orderStatus.filled)
-        if filled == 0 and trade.orderStatus.status == "Inactive":  # refused, not slow: re-pricing would not help
+        if filled == 0 and self.broker.refused(trade):  # refused, not slow: re-pricing would not help
             raise OrderRejected(f"IB rejected {action} {shares} {self.contract.symbol}: {self.broker.rejection(trade)}")
         if filled == 0:
             return None
@@ -193,7 +193,7 @@ class Executor:
             self._cancel_all(child_trades)  # IB drops the children of a refused parent; make sure
             raise
         if fill is None:
-            refused = [t for t in child_trades if t.orderStatus.status == "Inactive"]
+            refused = [t for t in child_trades if self.broker.refused(t)]
             self._cancel_all(child_trades)  # IB cancels children with their parent; make sure
             if refused:  # a refused stop is not a slow market: say so instead of dropping the entry quietly
                 raise OrderRejected(f"IB refused the stop/target of {order_ref}, so the entry never went live: "

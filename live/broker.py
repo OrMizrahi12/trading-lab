@@ -81,6 +81,11 @@ class Broker:
         if reqId > 0 and errorCode not in NOT_A_REFUSAL and not 2100 <= errorCode < 2200:
             self.errors[reqId] = (errorCode, errorString)
 
+    def refused(self, trade) -> bool:
+        """Did IB refuse this order? ib_async shows a refusal as Inactive for some errors and as Cancelled for others
+        (a bad price increment, error 110, arrives as Cancelled), so the error recorded for the order id counts too."""
+        return trade.orderStatus.status == "Inactive" or trade.order.orderId in self.errors
+
     def rejection(self, trade) -> str:
         """IB's code and reason for a refused order, as one line (it is logged where the refusal is found)."""
         self.ib.sleep(0.3)  # the error and the status update are separate messages: let both arrive
