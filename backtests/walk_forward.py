@@ -52,7 +52,8 @@ def session_days(bars: pd.DataFrame) -> pd.DatetimeIndex:
 
 def make_windows(bars: pd.DataFrame) -> list[dict]:
     start = session_days(bars)[0]
-    end = start + pd.DateOffset(months=24)
+    # 24 months at most; less when the data stops sooner (the last six months are held out), so no window is empty
+    end = min(start + pd.DateOffset(months=24), session_days(bars)[-1] + pd.Timedelta(days=1))
     out, k = [], 0
     while start + pd.DateOffset(months=TUNE_MONTHS + TRADE_MONTHS * (k + 1)) <= end:
         t0 = start + pd.DateOffset(months=TRADE_MONTHS * k)
