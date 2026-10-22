@@ -1,0 +1,502 @@
+diff --git a/.claude/hooks/judge_guard.py b/.claude/hooks/judge_guard.py
+index 83dbbd7..3b6829e 100644
+--- a/.claude/hooks/judge_guard.py
++++ b/.claude/hooks/judge_guard.py
+@@ -4,7 +4,8 @@
+ An agent told to "find profit" can reach it by loosening the judge instead of
+ finding an edge (Goodhart's law). So this hook blocks:
+ 
+-- changing the judge: anything under judge/, plus the files that hold this lock
++- changing the judge: anything under judge/, its two records (research/trials.csv, the trial ledger,
++  and research/audit_log.jsonl, the audit log) and the files that hold this lock
+   (.claude/settings.json, .claude/settings.local.json, this hook);
+ - touching the holdout: data/holdout/ is the last six months of bars, kept out
+   of the cache so research never sees them. Reading, listing or writing it is blocked;
+@@ -26,12 +27,14 @@ import re
+ import sys
+ from pathlib import Path
+ 
+-LOCKED_JUDGE = ("judge", ".claude/settings.json", ".claude/settings.local.json", ".claude/hooks/judge_guard.py")
++LOCKED_JUDGE = ("judge", "research/trials.csv", "research/audit_log.jsonl",
++                ".claude/settings.json", ".claude/settings.local.json", ".claude/hooks/judge_guard.py")
+ LOCKED_HOLDOUT = "data/holdout"
+ EDIT_TOOLS = {"Edit": "file_path", "Write": "file_path", "NotebookEdit": "notebook_path"}
+ 
+ JUDGE_REF = re.compile(
+-    r"(?<![\w.-])judge(?=[/\s'\"]|$)|\.claude/(?:settings(?:\.local)?\.json|hooks/judge_guard\.py)"
++    r"(?<![\w.-])judge(?=[/\s'\"]|$)|research/(?:trials\.csv|audit_log\.jsonl)"
++    r"|\.claude/(?:settings(?:\.local)?\.json|hooks/judge_guard\.py)"
+ )
+ # data/holdout, data', 'holdout and Path("data")/"holdout" all match
+ HOLDOUT_CODE = re.compile(r"""data['"\s)]*[/,]\s*['"]?holdout""", re.I)
+@@ -111,6 +114,39 @@ def judge_ref_allowed(segment: str) -> bool:
+     return words[0] in READ_ONLY
+ 
+ 
++def split_segments(text: str) -> list[str]:
++    """Split a shell command at ; & | newline ( ) and backticks, but not inside quotes.
++
++    Command substitution still runs inside double quotes, so `$(` and a backtick split there too.
++    """
++    segs, cur, quote, i = [], [], None, 0
++    while i < len(text):
++        ch = text[i]
++        if ch == "\\" and quote != "'" and i + 1 < len(text):  # an escaped character is never a separator or quote
++            cur.append(text[i:i + 2])
++            i += 2
++            continue
++        if quote == '"' and (ch == "`" or text.startswith("$(", i)):
++            segs.append("".join(cur))
++            cur = []
++            i += 1 if ch == "`" else 2
++            continue
++        if quote:
++            quote = None if ch == quote else quote
++            cur.append(ch)
++        elif ch in "'\"":
++            quote = ch
++            cur.append(ch)
++        elif ch in ";&|\n()`":
++            segs.append("".join(cur))
++            cur = []
++        else:
++            cur.append(ch)
++        i += 1
++    segs.append("".join(cur))
++    return segs
++
++
+ def check_bash(cmd: str) -> int:
+     text = strip_commit_message(cmd)
+     hit = holdout_in_text(text)
+@@ -119,7 +155,7 @@ def check_bash(cmd: str) -> int:
+     if "judge.scorecard" in text and re.search(r"--standards\b", text):
+         return block(JUDGE_MSG.format(what="running the scorecard against another standards file",
+                                       target="--standards"))
+-    for seg in re.split(r"[;&|\n]+|\$\(|`|\(|\)", text):
++    for seg in split_segments(text):
+         m = JUDGE_REF.search(seg)
+         if m and not judge_ref_allowed(seg):
+             return block(JUDGE_MSG.format(what="this command", target=m.group(0).strip("'\" ")))
+diff --git a/.claude/settings.json b/.claude/settings.json
+index 680bf0c..85f70bc 100644
+--- a/.claude/settings.json
++++ b/.claude/settings.json
+@@ -43,6 +43,8 @@
+       "Bash(git push --force:*)",
+       "Bash(git push -f:*)",
+       "Edit(./judge/**)",
++      "Edit(./research/trials.csv)",
++      "Edit(./research/audit_log.jsonl)",
+       "Edit(./.claude/settings.json)",
+       "Edit(./.claude/settings.local.json)",
+       "Edit(./.claude/hooks/judge_guard.py)",
+diff --git a/AGENTS.md b/AGENTS.md
+index af6547e..1c8f180 100644
+--- a/AGENTS.md
++++ b/AGENTS.md
+@@ -33,7 +33,7 @@ Top-level scripts (`market_data.py`, `scanner.py`, `orders.py`, ...) are one-off
+ - `tests/`: offline pytest tests. `tests/helpers.py` has the hand-made bar builders used by the trend strategy tests.
+ - `data/`: market data for research. Keep large or raw files out of Git (`data/cache/` and `data/holdout/` are gitignored).
+ - `data/holdout/`: the last six months of QQQ and SPY bars (from 2026-04-22; `QQQ_5min`, `SPY_5min`, `SPY_1min`), moved out of `data/cache/` so research never sees them. It is for a final, one-off check by the user, not for tuning. The cache now ends 2026-04-21, so every research script has about 18 months, not 24. Do not copy bars back into the cache. The downloader enforces this: `uv run -m data_pipeline` (and `--backfill-years`) sends every QQQ and SPY bar from `HOLDOUT_START` (`data_pipeline/config.py`) on into the holdout folder, and counts the holdout as already downloaded so it only fetches new bars. Moving the cutoff later is a human decision: edit `HOLDOUT_START` and move the bars by hand.
+-- **Locked files (Goodhart guard).** `judge/`, `.claude/settings.json`, `.claude/settings.local.json`, `.claude/hooks/judge_guard.py` and `data/holdout/` are protected by deny rules in `.claude/settings.json` and by the PreToolUse hook `.claude/hooks/judge_guard.py` (tests: `tests/test_judge_guard.py`). The agent can read the judge and run it, but cannot edit it, point `judge.scorecard` at another `--standards` file, or read the holdout. If a change is really needed (for example a new `STRATEGIES` entry in `judge/scorecard.py`), ask the user to make it by hand. The hook matches paths written in the command, so it is a guardrail, not a sandbox; do not try to get around it.
++- **Locked files (Goodhart guard).** `judge/`, `research/trials.csv`, `research/audit_log.jsonl`, `.claude/settings.json`, `.claude/settings.local.json`, `.claude/hooks/judge_guard.py` and `data/holdout/` are protected by deny rules in `.claude/settings.json` and by the PreToolUse hook `.claude/hooks/judge_guard.py` (tests: `tests/test_judge_guard.py`). The agent can read the judge and run it, but cannot edit it, point `judge.scorecard` at another `--standards` file, or read the holdout. If a change is really needed (for example a new `STRATEGIES` entry in `judge/scorecard.py`), ask the user to make it by hand. The hook matches paths written in the command, so it is a guardrail, not a sandbox; do not try to get around it.
+ - `strategies/specs/`: strategy spec YAMLs (`TEMPLATE.yaml` plus one per idea).
+ - `backtests/`: backtest runs and results. `backtests/vectorized.py` is a simple vectorized EMA(20/50) backtester on SPY 5min (`uv run -m backtests.vectorized`), with look-ahead and cost variants for comparison; not yet the shared engine.
+ - `backtests/engine.py`: the shared event-driven backtester (`uv run -m backtests.engine` runs `spy_vwap_reclaim` on SPY 5min). `run_backtest(bars, strategy)` feeds closed bars one at a time, fills at the next open, checks stop/target inside each bar via `check_bracket` (stop first, gaps fill at the open), models commission, spread (half per fill) and slippage (market-type fills only) with `CostModel`, and sizes each trade so a stop-out costs 1% of equity including costs, capped at 100% of equity (no leverage; tight stops hit the cap, so real risk is often well under 1%). `r_multiple` is net P&L over a fixed 1% of equity at entry; `stop_risk` is what a stop-out would really cost. Positions are never held overnight (forced exit at the next open). Tests: `tests/test_engine.py`.
+@@ -54,7 +54,7 @@ Top-level scripts (`market_data.py`, `scanner.py`, `orders.py`, ...) are one-off
+ - `reports/orb_noise_regimes.py`: two more stress tests of ORB on QQQ 5min (15-minute range, 1R target), tables only, no HTML (`uv run -m reports.orb_noise_regimes`, about 4 minutes). Parameter noise: 200 versions with range (15 +-7.5 min), target (1 +-0.3 R) and last entry (30 +-20 min before the close) drawn at random; prints how many make money and the Sharpe spread. Regime split: months with at least 10 sessions are labelled rising/falling (close-to-close change) and calm/wild (daily volatility vs. the median month); trades are grouped by the month they opened. Labels use hindsight, so this shows where the edge sits, not a tradable filter.
+ - `reports/luck_vs_skill.py`: how luck fools us, tables only, no HTML, numpy and pandas only (`uv run -m reports.luck_vs_skill`, about 8 minutes because it reruns the grid, random search, Optuna search and noise test). (1) 1,000 coin-flip strategies on QQQ (long or short, and long or flat, open to close, no costs): best Sharpe vs. median. (2) Deflated Sharpe Ratio of ORB QQQ 15 min / 1R: the probability the true Sharpe is above zero after counting the trials (42 grid + 42 random + 42 Optuna + 200 noise = 326 full-data runs; also shown for 42, 908 and an effective count from the grid's average correlation), with skew and kurtosis of the daily returns. (3) Probability of Backtest Overfitting of the 42-cell grid by combinatorially symmetric cross-validation (8 and 16 time blocks). The trial Sharpes are highly correlated, so the DSR trial count is a judgment call; read the range, not one number.
+ - `reports/reversion_by_day_type.py`: splits both reversion strategies' trades (SPY and QQQ 5min, usual costs) into trend days (the third of sessions with the biggest open-to-close move, per symbol) vs. other days and writes `reports/reversion_by_day_type.html` (`uv run -m reports.reversion_by_day_type`, a few minutes). Trend days are picked with hindsight, so this shows where the edge goes, not a tradable filter.
+-- `judge/scorecard.py` and `judge/standards.yaml`: the lab's standards as a judge. `uv run -m judge.scorecard <strategy> --symbol QQQ --set name=value --trials N` runs eight rules and prints PASS or FAIL for each (at least 200 trades, Sharpe after costs, walk-forward out-of-sample Sharpe with re-tuning, the fixed settings' Sharpe on the same months, Monte Carlo drawdown at the 5th percentile, break-even cost multiple, Deflated Sharpe, parameter noise), exits 1 if any fails; `scorecard(name, symbol, settings, trials=)` is the function for research loops. Thresholds and the reasoning for each live in the YAML; change them there. Everything runs in one process pool, 30 s to 2 minutes per strategy. Walk-forward re-tunes each window, so it judges the strategy plus its tuning; a separate rule holds the fixed settings to the same bar on the same months. `--trials` is how many settings the research tried (the Deflated Sharpe needs it; default 100 is a guess and the output says "assumed"). A new strategy needs an entry in `STRATEGIES` (its tunable settings and ranges). Tests: `tests/test_scorecard.py` (pure parts only).
++- `judge/scorecard.py` and `judge/standards.yaml`: the lab's standards as a judge. `uv run -m judge.scorecard <strategy> --symbol QQQ --set name=value --trials N` runs eight rules and prints PASS or FAIL for each (at least 200 trades, Sharpe after costs, walk-forward out-of-sample Sharpe with re-tuning, the fixed settings' Sharpe on the same months, Monte Carlo drawdown at the 5th percentile, break-even cost multiple, Deflated Sharpe, parameter noise), exits 1 if any fails; `scorecard(name, symbol, settings, trials=)` is the function for research loops. Thresholds and the reasoning for each live in the YAML; change them there. Everything runs in one process pool, 30 s to 2 minutes per strategy. Walk-forward re-tunes each window, so it judges the strategy plus its tuning; a separate rule holds the fixed settings to the same bar on the same months. `--trials` is how many settings the research says it tried (the Deflated Sharpe needs it; default 100 is a guess and the output says "assumed"). It is only a claim: every run is also written to the trial ledger `research/trials.csv` (time, commit, strategy, symbol, full settings), and the Deflated Sharpe uses the larger of the claim and the number of distinct (symbol, settings) rows the ledger holds for that strategy, so `--trials` can only raise the count (the note under rule 7 says whether it came from "claimed", "assumed" or "ledger"). Rerunning the same settings is not a new trial; a run that crashes still counts. The ledger is written before the backtests start, and the judge refuses to run if the file has fewer rows than the committed copy, so commit it often. Every run, finished or crashed, also appends one line to `research/audit_log.jsonl` (time, commit and whether the code was dirty, command, settings, seeds, hash of the standards used, trial counts, pass/fail per rule). Both files are append-only and locked against the agent like `judge/` itself; reading them is fine. Tests: `tests/test_trial_ledger.py`. A new strategy needs an entry in `STRATEGIES` (its tunable settings and ranges). Tests: `tests/test_scorecard.py` (pure parts only).
+ - `research/journal.md` and `research/cards/`: the idea journal (ranked by promise and cost to test) and one strategy card per finished experiment (rules, settings, full scorecard, verdict, next step). Failed ideas get a card too. H1 (trend-day filter, `max_open_distance_atr` on both reversion strategies, helpers in `strategies/session_clock.py`) failed the judge.
+ - `notebooks/`: exploratory Jupyter notebooks.
+ 
+diff --git a/judge/scorecard.py b/judge/scorecard.py
+index a7f1c06..a07176d 100644
+--- a/judge/scorecard.py
++++ b/judge/scorecard.py
+@@ -13,8 +13,12 @@ and reports/luck_vs_skill.py, made strategy-agnostic and cut down so one run tak
+ every backtest (main run, cost sweep, noise versions, walk-forward tuning) goes into one process pool.
+ 
+ From code: `scorecard(name, symbol, settings, trials=...)` returns {"passed": bool, "rules": [...], ...}.
+-The CLI exits 1 when any rule fails. `trials` is how many settings the research tried before these;
+-the Deflated Sharpe needs it, so a research loop should pass the real count.
++The CLI exits 1 when any rule fails. `trials` is how many settings the research says it tried; the
++Deflated Sharpe needs it. It is a claim, not the truth: every run is also written to the trial ledger
++(research/trials.csv, one row per run) and the Deflated Sharpe uses the larger of the claim and the
++number of distinct (symbol, settings) rows the ledger holds for that strategy, so `trials` can only raise
++the count. Every run, finished or crashed, appends one line to research/audit_log.jsonl (time, git commit,
++command, settings, seeds, trial counts, result). Both files are append-only and locked against the agent.
+ 
+ To judge a new strategy add it to STRATEGIES with the settings Optuna may tune and their ranges.
+ 
+@@ -23,14 +27,19 @@ Paper research only. Nothing here touches a broker. Nothing here is financial ad
+ 
+ import argparse
+ import ast
++import csv
++import fcntl
++import hashlib
++import json
+ import os
+ import re
++import subprocess
+ import sys
+ import time as clock
+ import warnings
+ from concurrent.futures import ProcessPoolExecutor
+ from dataclasses import dataclass, replace
+-from datetime import time
++from datetime import datetime, time, timezone
+ from math import e, sqrt
+ from pathlib import Path
+ from statistics import NormalDist
+@@ -51,7 +60,9 @@ from strategies.opening_range_breakout import OpeningRangeBreakout, OpeningRange
+ from strategies.vwap_stretch_reversion import VwapStretchReversion, VwapStretchReversionParams
+ 
+ STANDARDS = Path(__file__).with_name("standards.yaml")
+-ANN = sqrt(TRADING_DAYS)
++RESEARCH = Path(__file__).resolve().parent.parent / "research"  # holds trials.csv and audit_log.jsonl
++LEDGER_FIELDS = ["time", "commit", "strategy", "symbol", "settings"]
++ANN =sqrt(TRADING_DAYS)
+ EULER = 0.5772156649015329
+ NORM = NormalDist()
+ 
+@@ -90,6 +101,73 @@ def load_standards(path: Path = STANDARDS) -> dict:
+     return yaml.safe_load(path.read_text())
+ 
+ 
++# ---- trial ledger and audit log ----
++
++def settings_key(name: str, settings: dict) -> str:
++    """Canonical text for a setting set with the strategy's defaults filled in, so `--set x=<default>` and no flag match."""
++    params = STRATEGIES[name].params
++    full = {f: getattr(params(), f) for f in params.__dataclass_fields__} | settings
++    return json.dumps(full, sort_keys=True, default=str)
++
++
++def git_state(root: Path = RESEARCH.parent) -> dict:
++    """Current commit and whether the code differs from it (the two research files this module writes don't count)."""
++    def git(*args: str) -> str:
++        return subprocess.run(["git", *args], cwd=root, capture_output=True, text=True, check=True).stdout
++    try:
++        dirty = git("status", "--porcelain", "--", ".", ":(exclude)research/trials.csv", ":(exclude)research/audit_log.jsonl")
++        return {"commit": git("rev-parse", "HEAD").strip(), "dirty": bool(dirty.strip())}
++    except (OSError, subprocess.CalledProcessError):
++        return {"commit": "unknown", "dirty": None}
++
++
++def committed_ledger_rows(path: Path, root: Path = RESEARCH.parent) -> int:
++    """Data rows of the ledger as committed at HEAD (0 if it is not committed yet or git is missing)."""
++    try:
++        text = subprocess.run(["git", "show", f"HEAD:{path.resolve().relative_to(root.resolve()).as_posix()}"],
++                              cwd=root, capture_output=True, text=True, check=True).stdout
++    except (OSError, subprocess.CalledProcessError, ValueError):
++        return 0
++    return max(len(text.splitlines()) - 1, 0)
++
++
++def record_trial(path: Path, strategy: str, symbol: str, settings: str, commit: str, root: Path = RESEARCH.parent) -> int:
++    """Append this run to the ledger; return how many distinct (symbol, settings) rows `strategy` has, this run included.
++
++    Written before the backtests start, so a run that is stopped or crashes still counts. Refuses to run if the file
++    has fewer rows than the committed one (someone deleted trials).
++    """
++    path.parent.mkdir(parents=True, exist_ok=True)
++    with open(path, "a+", newline="") as f:
++        fcntl.flock(f, fcntl.LOCK_EX)  # parallel runs queue up here
++        f.seek(0)
++        rows = list(csv.DictReader(f))
++        if len(rows) < committed_ledger_rows(path, root):
++            raise RuntimeError(f"{path} has {len(rows)} rows but the committed copy has more: trials were removed. "
++                               "Restore it (git checkout) before judging anything.")
++        writer = csv.DictWriter(f, LEDGER_FIELDS)
++        if os.fstat(f.fileno()).st_size == 0:
++            writer.writeheader()
++        row = {"time": datetime.now(timezone.utc).isoformat(timespec="seconds"), "commit": commit,
++               "strategy": strategy, "symbol": symbol, "settings": settings}
++        writer.writerow(row)
++        f.flush()
++    return len({(r["symbol"], r["settings"]) for r in rows + [row] if r.get("strategy") == strategy})
++
++
++def effective_trials(claimed: int | None, assumed: int, ledger: int) -> tuple[int, str]:
++    """(trial count the Deflated Sharpe uses, where it came from). The ledger can raise the count, nothing lowers it."""
++    asked, basis = (claimed, "claimed") if claimed is not None else (assumed, "assumed")
++    return (ledger, "ledger") if ledger > asked else (asked, basis)
++
++
++def append_audit(path: Path, record: dict) -> None:
++    path.parent.mkdir(parents=True, exist_ok=True)
++    with open(path, "a") as f:
++        fcntl.flock(f, fcntl.LOCK_EX)
++        f.write(json.dumps(record, default=str) + "\n")
++
++
+ def bars_for(symbol: str) -> pd.DataFrame:
+     return load_bars(CACHE.with_name(f"{symbol}_5min.parquet"))
+ 
+@@ -216,11 +294,33 @@ def walk_forward(name: str, symbol: str, settings: dict, windows: list[dict], pi
+ 
+ 
+ def scorecard(name: str, symbol: str, settings: dict, standards: dict | None = None, trials: int | None = None,
+-              log=lambda s: print(s, file=sys.stderr, flush=True)) -> dict:
+-    t0 = clock.time()
++              log=lambda s: print(s, file=sys.stderr, flush=True), research_dir: Path = RESEARCH) -> dict:
++    """Judge one strategy. Logs the run in the trial ledger first, runs the battery, then writes the audit line."""
+     std = standards or load_standards()
++    git = git_state(research_dir.parent)
++    in_ledger = record_trial(research_dir / "trials.csv", name, symbol, settings_key(name, settings), git["commit"],
++                             research_dir.parent)
++    n_trials, basis = effective_trials(trials, std["tests"]["assumed_trials"], in_ledger)
++    audit = {"time": datetime.now(timezone.utc).isoformat(timespec="seconds"), **git, "command": " ".join(sys.argv),
++             "strategy": name, "symbol": symbol, "settings": settings,
++             "seed": {k: v["seed"] for k, v in std["tests"].items() if isinstance(v, dict) and "seed" in v},
++             "standards_sha256": hashlib.sha256(json.dumps(std, sort_keys=True, default=str).encode()).hexdigest(),
++             "trials": {"claimed": trials, "assumed": std["tests"]["assumed_trials"], "ledger": in_ledger,
++                        "used": n_trials, "basis": basis}}
++    try:
++        card = _evaluate(name, symbol, settings, std, n_trials, basis, log)
++    except BaseException as exc:  # a crashed or interrupted run is still a run
++        append_audit(research_dir / "audit_log.jsonl", {**audit, "result": {"error": repr(exc)}})
++        raise
++    append_audit(research_dir / "audit_log.jsonl", {**audit, "result": {
++        "passed": card["passed"], "seconds": round(card["seconds"], 1),
++        "rules": [{"name": r.name, "value": r.value, "needs": r.needs, "passed": r.passed} for r in card["rules"]]}})
++    return card
++
++
++def _evaluate(name: str, symbol: str, settings: dict, std: dict, n_trials: int, basis: str, log) -> dict:
++    t0 = clock.time()
+     rules_cfg, tests = std["rules"], std["tests"]
+-    n_trials = trials if trials is not None else tests["assumed_trials"]
+     bars = bars_for(symbol)
+     wf, mc, sweep_cfg, noise_cfg = tests["walk_forward"], tests["monte_carlo"], tests["cost_sweep"], tests["noise"]
+     windows = make_windows(bars)
+@@ -278,7 +378,7 @@ def scorecard(name: str, symbol: str, settings: dict, standards: dict | None = N
+              + ", ".join(f"${sweep[k]:,.0f}" for k in sorted(sweep))),
+         Rule("Deflated Sharpe", f"{dsr:.1%}", f">= {rules_cfg['min_deflated_sharpe']:.0%}",
+              dsr >= rules_cfg["min_deflated_sharpe"],
+-             f"after {n_trials} trials{' (assumed)' if trials is None else ''}, bar to beat {star:.2f}"),
++             f"after {n_trials} trials ({basis}), bar to beat {star:.2f}"),
+         Rule("Parameter noise", f"{share:.0%}", f">= {rules_cfg['min_noise_profitable_share']:.0%}",
+              share >= rules_cfg["min_noise_profitable_share"],
+              f"{int((noise.net_profit > 0).sum())} of {len(noise)} nudged versions profitable, "
+@@ -323,7 +423,8 @@ def main() -> None:
+     ap.add_argument("strategy", choices=sorted(STRATEGIES))
+     ap.add_argument("--symbol", default="SPY")
+     ap.add_argument("--set", action="append", default=[], metavar="NAME=VALUE", help="a strategy setting; repeat for several")
+-    ap.add_argument("--trials", type=int, help="how many settings the research tried (default: assumed_trials in standards.yaml)")
++    ap.add_argument("--trials", type=int, help="how many settings the research tried (default: assumed_trials in standards.yaml); "
++                    "the judge uses the larger of this and its own count in research/trials.csv")
+     ap.add_argument("--standards", type=Path, default=STANDARDS)
+     args = ap.parse_args()
+     settings = {k: parse_value(v) for k, v in (s.split("=", 1) for s in args.set)}
+diff --git a/tests/test_judge_guard.py b/tests/test_judge_guard.py
+index b394eb6..e0ae31e 100644
+--- a/tests/test_judge_guard.py
++++ b/tests/test_judge_guard.py
+@@ -41,7 +41,8 @@ def assert_blocked(r, word):
+ @pytest.mark.parametrize("tool", ["Edit", "Write"])
+ @pytest.mark.parametrize("rel", ["judge/standards.yaml", "judge/scorecard.py", "judge/new_rule.py",
+                                  ".claude/settings.json", ".claude/settings.local.json",
+-                                 ".claude/hooks/judge_guard.py"])
++                                 ".claude/hooks/judge_guard.py", "research/trials.csv",
++                                 "research/audit_log.jsonl"])
+ def test_edit_or_write_of_the_judge_is_blocked(root, tool, rel):
+     assert_blocked(run(root, tool, file_path=str(root / rel)), "judge")
+ 
+@@ -90,6 +91,17 @@ def test_reading_the_judge_is_allowed(root):
+     "rm .claude/hooks/judge_guard.py",
+     "cat judge/standards.yaml && cp /tmp/a judge/standards.yaml",
+     "uv run -m judge.scorecard orb --standards /tmp/weak.yaml",
++    # the trial ledger and audit log are append-only records written by the judge itself
++    "sed -i '$d' research/trials.csv",
++    "echo 'x' > research/trials.csv",
++    "truncate -s 0 research/audit_log.jsonl",
++    "rm research/trials.csv",
++    "grep -v orb research/trials.csv | tee research/trials.csv",
++    # quoting must not hide a write: command substitution runs inside double quotes
++    "echo \"$(cp /tmp/a judge/standards.yaml)\"",
++    "echo \"`cp /tmp/a judge/standards.yaml`\"",
++    "cat 'a;b' && cp /tmp/a judge/standards.yaml",
++    "grep \"a\\|b\" judge/standards.yaml > judge/other.yaml",
+ ])
+ def test_bash_that_changes_the_judge_is_blocked(root, cmd):
+     r = bash(root, cmd)
+@@ -106,6 +118,16 @@ def test_bash_that_changes_the_judge_is_blocked(root, cmd):
+     "git add judge/standards.yaml .claude/settings.json",
+     "uv run -m judge.scorecard opening_range_breakout --symbol QQQ --trials 42",
+     "uv run pytest tests/test_scorecard.py",
++    # a separator inside quotes (a regex alternation) is not a separator
++    "grep -n \"min_\\|threshold\\|trades\" judge/standards.yaml",
++    "grep -E \"min_|max_\" judge/standards.yaml",
++    "grep -n 'a;b' judge/standards.yaml",
++    "grep -c '(a)' judge/scorecard.py",
++    # the records can be read, tailed and committed
++    "cat research/trials.csv",
++    "tail -n 5 research/audit_log.jsonl",
++    "wc -l research/trials.csv",
++    "git add research/trials.csv research/audit_log.jsonl",
+     "git commit -m \"judge: tighten judge/standards.yaml thresholds\"",
+     "git commit -m \"$(cat <<'EOF'\nresearch: edits judge/standards.yaml? no\n\nsee data/holdout/\nEOF\n)\"",
+ ])
+diff --git a/tests/test_trial_ledger.py b/tests/test_trial_ledger.py
+new file mode 100644
+index 0000000..2017a8a
+--- /dev/null
++++ b/tests/test_trial_ledger.py
+@@ -0,0 +1,151 @@
++"""Offline tests for the judge's trial ledger and audit log (judge/scorecard.py). No backtests are run."""
++
++import csv
++import json
++import subprocess
++
++import pytest
++
++import judge.scorecard as sc
++from judge.scorecard import Rule, effective_trials, record_trial, settings_key
++
++ORB = "opening_range_breakout"
++
++
++def ledger_rows(path):
++    return list(csv.DictReader(path.open()))
++
++
++def test_settings_key_fills_in_defaults_and_ignores_order():
++    default = sc.STRATEGIES[ORB].params().range_minutes
++    assert settings_key(ORB, {}) == settings_key(ORB, {"range_minutes": default})  # same strategy, one trial
++    assert settings_key(ORB, {"range_minutes": default + 5}) != settings_key(ORB, {})
++    assert settings_key(ORB, {"range_minutes": 15, "target_r": 1.0}) == settings_key(ORB, {"target_r": 1.0, "range_minutes": 15})
++
++
++def test_ledger_counts_distinct_settings_per_strategy(tmp_path):
++    path = tmp_path / "trials.csv"
++    assert record_trial(path, ORB, "QQQ", '{"a": 1}', "abc", tmp_path) == 1
++    assert record_trial(path, ORB, "QQQ", '{"a": 2}', "abc", tmp_path) == 2
++    assert record_trial(path, ORB, "SPY", '{"a": 2}', "abc", tmp_path) == 3  # another symbol is another test
++    assert record_trial(path, "donchian_breakout", "QQQ", '{"a": 9}', "abc", tmp_path) == 1  # counted per strategy
++    assert record_trial(path, ORB, "QQQ", '{"a": 1}', "abc", tmp_path) == 3  # a rerun is not a new trial...
++    rows = ledger_rows(path)
++    assert len(rows) == 5 and list(rows[0]) == sc.LEDGER_FIELDS  # ...but it is still written down
++
++
++def test_ledger_survives_a_missing_directory_and_an_empty_file(tmp_path):
++    path = tmp_path / "research" / "trials.csv"
++    assert record_trial(path, ORB, "QQQ", "{}", "abc", tmp_path) == 1
++    empty = tmp_path / "empty.csv"
++    empty.touch()
++    assert record_trial(empty, ORB, "QQQ", "{}", "abc", tmp_path) == 1
++    assert len(ledger_rows(empty)) == 1
++
++
++@pytest.mark.parametrize("claimed,assumed,ledger,expected", [
++    (None, 100, 3, (100, "assumed")),
++    (42, 100, 3, (42, "claimed")),      # a claim below the assumed default is still the user's call
++    (5, 100, 30, (30, "ledger")),       # the ledger beats a low claim
++    (None, 20, 30, (30, "ledger")),
++    (500, 100, 30, (500, "claimed")),   # a claim can always raise the count
++    (30, 100, 30, (30, "claimed")),
++])
++def test_effective_trials_only_goes_up(claimed, assumed, ledger, expected):
++    assert effective_trials(claimed, assumed, ledger) == expected
++
++
++def git(cwd, *args):
++    subprocess.run(["git", "-c", "user.name=t", "-c", "user.email=t@t", *args], cwd=cwd, check=True, capture_output=True)
++
++
++def test_ledger_refuses_to_run_when_committed_rows_were_deleted(tmp_path):
++    git(tmp_path, "init", "-q")
++    path = tmp_path / "research" / "trials.csv"
++    for i in range(3):
++        record_trial(path, ORB, "QQQ", f'{{"a": {i}}}', "abc", tmp_path)
++    git(tmp_path, "add", "-A")
++    git(tmp_path, "commit", "-q", "-m", "ledger")
++
++    lines = path.read_text().splitlines(keepends=True)
++    path.write_text("".join(lines[:2]))  # header + one trial: two trials erased
++    with pytest.raises(RuntimeError, match="trials were removed"):
++        record_trial(path, ORB, "QQQ", '{"a": 9}', "abc", tmp_path)
++    assert path.read_text() == "".join(lines[:2])  # and it wrote nothing
++
++    path.write_text("".join(lines) )  # restored: fine again, appends one
++    assert record_trial(path, ORB, "QQQ", '{"a": 9}', "abc", tmp_path) == 4
++
++
++def test_git_state_outside_a_repo_is_unknown(tmp_path):
++    assert sc.git_state(tmp_path) == {"commit": "unknown", "dirty": None}
++
++
++def test_git_state_ignores_the_two_record_files(tmp_path):
++    git(tmp_path, "init", "-q")
++    (tmp_path / "research").mkdir()
++    (tmp_path / "code.py").write_text("x = 1\n")
++    git(tmp_path, "add", "-A")
++    git(tmp_path, "commit", "-q", "-m", "c")
++    (tmp_path / "research" / "trials.csv").write_text("new\n")
++    (tmp_path / "research" / "audit_log.jsonl").write_text("{}\n")
++    assert sc.git_state(tmp_path)["dirty"] is False
++    (tmp_path / "code.py").write_text("x = 2\n")
++    assert sc.git_state(tmp_path)["dirty"] is True
++
++
++# --- scorecard() with the heavy part replaced -----------------------------
++
++def fake_card(**_):
++    return {"passed": True, "seconds": 1.234, "rules": [Rule("Trades", "250", ">= 200", True)]}
++
++
++@pytest.fixture
++def judged(tmp_path, monkeypatch):
++    monkeypatch.setattr(sc, "_evaluate", lambda *a, **k: fake_card())
++    monkeypatch.setattr(sc, "git_state", lambda root=None: {"commit": "deadbeef", "dirty": False})
++    return tmp_path / "research"
++
++
++def audit_lines(research):
++    return [json.loads(line) for line in (research / "audit_log.jsonl").read_text().splitlines()]
++
++
++def test_every_run_appends_one_audit_line(judged):
++    sc.scorecard(ORB, "QQQ", {"range_minutes": 15}, trials=42, research_dir=judged, log=lambda s: None)
++    sc.scorecard(ORB, "SPY", {}, research_dir=judged, log=lambda s: None)
++    first, second = audit_lines(judged)
++    assert first["commit"] == "deadbeef" and first["dirty"] is False
++    assert first["strategy"] == ORB and first["symbol"] == "QQQ" and first["settings"] == {"range_minutes": 15}
++    assert first["seed"] == {"walk_forward": 7, "monte_carlo": 42, "noise": 11}
++    assert first["trials"] == {"claimed": 42, "assumed": 100, "ledger": 1, "used": 42, "basis": "claimed"}
++    assert first["result"]["passed"] is True and first["result"]["rules"][0]["name"] == "Trades"
++    assert second["trials"]["claimed"] is None and second["trials"]["basis"] == "assumed"
++    assert {"time", "command", "standards_sha256"} <= set(first)
++
++
++def test_a_low_claim_cannot_lower_the_count_below_the_ledger(judged):
++    for i in range(5):
++        sc.scorecard(ORB, "QQQ", {"range_minutes": 5 + 5 * i}, trials=1, research_dir=judged, log=lambda s: None)
++    last = audit_lines(judged)[-1]["trials"]
++    assert last == {"claimed": 1, "assumed": 100, "ledger": 5, "used": 5, "basis": "ledger"}
++    assert len(ledger_rows(judged / "trials.csv")) == 5
++
++
++def test_a_crashed_run_still_counts_and_is_logged(judged, monkeypatch):
++    def boom(*a, **k):
++        raise ValueError("no bars")
++    monkeypatch.setattr(sc, "_evaluate", boom)
++    with pytest.raises(ValueError):
++        sc.scorecard(ORB, "QQQ", {}, research_dir=judged, log=lambda s: None)
++    assert len(ledger_rows(judged / "trials.csv")) == 1
++    assert "ValueError" in audit_lines(judged)[0]["result"]["error"]
++
++
++def test_the_standards_hash_changes_when_a_threshold_does(judged):
++    std = sc.load_standards()
++    sc.scorecard(ORB, "QQQ", {}, std, research_dir=judged, log=lambda s: None)
++    std["rules"]["min_trades"] = 20
++    sc.scorecard(ORB, "QQQ", {}, std, research_dir=judged, log=lambda s: None)
++    a, b = audit_lines(judged)
++    assert a["standards_sha256"] != b["standards_sha256"]
