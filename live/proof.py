@@ -31,7 +31,7 @@ from .config import FLATTEN_BEFORE_CLOSE_MIN, STATE_DIR
 from .execution import DuplicateEntry, ExecutionHalt, Executor, utc_now
 from .feed import BarFeed
 from .reconcile import ib_shares, open_orders
-from .refs import entry_ref, owns
+from .refs import entry_ref, order_label, owns
 from .state import PositionState, lock, run_dir
 
 NAME = "proof_entry"
@@ -52,8 +52,8 @@ def session_open(now: pd.Timestamp) -> tuple[pd.Timestamp, pd.Timestamp] | None:
 def describe(trade) -> str:
     o = trade.order
     price = getattr(o, "lmtPrice", 0) or getattr(o, "auxPrice", 0)
-    parent = f" parent #{o.parentId}" if getattr(o, "parentId", 0) else ""
-    return f"#{o.orderId} {o.action} {o.orderType} {o.totalQuantity} @ {price} {o.tif}{parent} [{trade.orderStatus.status}] ref {o.orderRef}"
+    parent = f" parent {o.parentId}" if getattr(o, "parentId", 0) else ""
+    return f"{order_label(o)} {o.action} {o.orderType} {o.totalQuantity} @ {price} {o.tif}{parent} [{trade.orderStatus.status}] ref {o.orderRef}"
 
 
 def prove(ib, *, symbol: str = "SPY", price, clock=utc_now, out=print, executor: Executor | None = None) -> int:
@@ -126,11 +126,22 @@ def finish(ib, broker: Broker, symbol: str, out, *, expect_sent: int | None) -> 
     return 0 if ok else 1
 
 
+def setup_logging(directory) -> None:
+    """Everything the libraries and the live code log (ib_async included) goes to events.log; the console only gets
+    the proof's own lines."""
+    directory.mkdir(parents=True, exist_ok=True)
+    handler = logging.FileHandler(directory / "events.log")
+    handler.setFormatter(logging.Formatter("%(asctime)s %(name)s %(levelname)s %(message)s"))
+    root = logging.getLogger()
+    root.handlers[:] = [handler]  # no console handler, whoever added one
+    root.setLevel(logging.INFO)
+
+
 def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--symbol", default="SPY")
     args = ap.parse_args()
-    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s", stream=sys.stdout)
+    setup_logging(run_dir(NAME, args.symbol, STATE_DIR))
     ib = None
     try:
         ib = connect_paper()

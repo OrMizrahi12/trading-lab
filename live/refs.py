@@ -17,6 +17,12 @@ def entry_ref(tag: str, signal_bar: pd.Timestamp) -> str:
     return f"{tag}:{when:%Y-%m-%d}:{when:%H%M}"
 
 
+def order_label(order) -> str:
+    """IB's permId when it has one (it stays the same across sessions); orderId is 0 for orders of an earlier session."""
+    perm = getattr(order, "permId", 0)
+    return f"permId {perm}" if perm else f"order #{order.orderId}"
+
+
 def owns(tag: str, ref: str) -> bool:
     """Is this orderRef ours? The plain tag (exits, repairs) or the tag plus a session and a bar (entries)."""
     return ref == tag or ref.startswith(tag + ":")
@@ -28,7 +34,7 @@ def evidence(ib, ref: str) -> list[str]:
     ib.reqAllOpenOrders()
     for t in ib.openTrades():
         if t.order.orderRef == ref:
-            found.append(f"open order #{t.order.orderId} {t.order.action} {t.order.orderType} {t.order.totalQuantity}")
+            found.append(f"open {order_label(t.order)} {t.order.action} {t.order.orderType} {t.order.totalQuantity}")
     for f in ib.reqExecutions():
         if f.execution.orderRef == ref:
             found.append(f"execution today: {f.execution.side} {f.execution.shares} @ {f.execution.price}")
@@ -36,5 +42,5 @@ def evidence(ib, ref: str) -> list[str]:
         if t.order.orderRef == ref and not t.isDone():
             continue  # already listed as an open order
         if t.order.orderRef == ref:
-            found.append(f"order #{t.order.orderId} {t.order.action} sent earlier in this session ({t.orderStatus.status})")
+            found.append(f"{order_label(t.order)} {t.order.action} sent earlier in this session ({t.orderStatus.status})")
     return found

@@ -79,3 +79,38 @@ def test_an_entry_that_does_not_fill_leaves_nothing_resting():
     ib.freeze = True
     code, text = run(ib, executor=None)
     assert code == 0 and "not filled" in text and ib.openTrades() == [] and ib.holdings.get("SPY", 0) == 0
+
+
+def test_orders_of_an_earlier_session_are_named_by_permid_not_order_zero():
+    from types import SimpleNamespace
+
+    from live.refs import evidence, order_label
+    from tests.fake_ib import FakeTrade
+
+    old = SimpleNamespace(orderId=0, permId=1234567, orderRef="r", action="BUY", orderType="LMT", totalQuantity=1)
+    assert order_label(old) == "permId 1234567"
+    assert order_label(SimpleNamespace(orderId=7, permId=0)) == "order #7"  # a fresh order has no permId yet
+    ib = paper()
+    ib._trades.append(FakeTrade(SimpleNamespace(symbol="SPY"), old))
+    (line,) = evidence(ib, "r")
+    assert "permId 1234567" in line and "#0" not in line
+
+
+def test_library_log_lines_go_to_the_file_not_the_console(tmp_path, capsys):
+    import logging
+
+    from live.proof import setup_logging
+
+    root = logging.getLogger()
+    saved = root.handlers[:], root.level
+    try:
+        root.addHandler(logging.StreamHandler())  # e.g. a basicConfig somebody else did
+        setup_logging(tmp_path)
+        logging.getLogger("ib_async.wrapper").info("Warning 2104, Market data farm connection is OK")
+        logging.getLogger("live").warning("something worth keeping")
+    finally:
+        root.handlers[:], root.level = saved
+    shown = capsys.readouterr()
+    assert shown.out == "" and shown.err == ""
+    log = (tmp_path / "events.log").read_text()
+    assert "Market data farm connection is OK" in log and "something worth keeping" in log
