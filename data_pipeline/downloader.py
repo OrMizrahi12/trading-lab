@@ -128,6 +128,14 @@ def _session_dates(index):
     return set(index.tz_convert(SESSION_TZ).date)
 
 
+def _write_holdout(path, held: pd.DataFrame) -> int:
+    """Merge held-out bars into their own file (never the cache); returns how many were new."""
+    if held.empty:
+        return 0
+    before = cache.read(path)
+    return len(cache.merge_and_write(path, held)) - (0 if before is None else len(before))
+
+
 def download_missing(
     ib, symbol, bar_size, cache_dir=CACHE_DIR, now=None, throttle: Throttle = hist_throttle
 ) -> dict:
@@ -139,7 +147,8 @@ def download_missing(
     spec = BAR_SIZES[bar_size]
     now = now or datetime.now(timezone.utc)
     path = cache.cache_path(symbol, bar_size, cache_dir)
-    last = cache.last_timestamp(path)
+    hold = cache.holdout_path(symbol, bar_size, cache_dir)
+    last = cache.edge_timestamp([path, hold], newest=True)  # held-out bars count as already downloaded
 
     trading_days = None
     if last is not None:
@@ -179,12 +188,15 @@ def download_missing(
 
     old = cache.read(path)
     before = 0 if old is None else len(old)
+    new, held = cache.split_holdout(symbol, new) if not new.empty else (new, new)
+    held_added = _write_holdout(hold, held)
     if new.empty:
         if old is None or old.empty:
-            return {"path": path, "added": 0, "first": None, "last": None}
-        return {"path": path, "added": 0, "first": old.index.min(), "last": old.index.max()}
+            return {"path": path, "added": 0, "holdout_added": held_added, "first": None, "last": None}
+        return {"path": path, "added": 0, "holdout_added": held_added, "first": old.index.min(), "last": old.index.max()}
     merged = cache.merge_and_write(path, new)
-    return {"path": path, "added": len(merged) - before, "first": merged.index.min(), "last": merged.index.max()}
+    return {"path": path, "added": len(merged) - before, "holdout_added": held_added,
+            "first": merged.index.min(), "last": merged.index.max()}
 
 
 def backfill(
@@ -201,9 +213,10 @@ def backfill(
         raise ValueError("target_start must be timezone-aware")
     now = now or datetime.now(timezone.utc)
     path = cache.cache_path(symbol, bar_size, cache_dir)
-    old = cache.read(path)
-    end = now if old is None or old.empty else old.index.min().to_pydatetime()
-    added, requests, empty_run = 0, 0, 0
+    hold = cache.holdout_path(symbol, bar_size, cache_dir)
+    oldest_known = cache.edge_timestamp([path, hold], newest=False)
+    end = now if oldest_known is None else oldest_known.to_pydatetime()
+    added, held_added, requests, empty_run = 0, 0, 0, 0
 
     contract = Stock(symbol, "SMART", "USD")
     ib.qualifyContracts(contract)
@@ -221,6 +234,8 @@ def backfill(
             empty_run = 0
             oldest = df.index.min().to_pydatetime()
             new = df[(df.index >= target_start) & (df.index + spec.length <= now)]
+            new, held = cache.split_holdout(symbol, new)
+            held_added += _write_holdout(hold, held)
             if not new.empty:
                 before = len(cache.read(path)) if path.exists() else 0
                 added += len(cache.merge_and_write(path, new)) - before
@@ -234,4 +249,4 @@ def backfill(
 
     merged = cache.read(path)
     first, last = (None, None) if merged is None or merged.empty else (merged.index.min(), merged.index.max())
-    return {"path": path, "added": added, "requests": requests, "first": first, "last": last}
+    return {"path": path, "added": added, "holdout_added": held_added, "requests": requests, "first": first, "last": last}

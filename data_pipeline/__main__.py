@@ -14,11 +14,11 @@ def dry_run(symbols, bar_sizes, backfill_years=None):
         for bar_size in bar_sizes:
             spec = BAR_SIZES[bar_size]
             path = cache.cache_path(symbol, bar_size)
-            last = cache.last_timestamp(path)
+            last = cache.edge_timestamp([path, cache.holdout_path(symbol, bar_size)], newest=True)
             if backfill_years:
                 target = now - timedelta(days=365.25 * backfill_years)
-                df = cache.read(path)
-                end = now if df is None or df.empty else df.index.min()
+                oldest = cache.edge_timestamp([path, cache.holdout_path(symbol, bar_size)], newest=False)
+                end = now if oldest is None else oldest
                 chunks = max(0, -(-(end - target) // spec.chunk_length))
                 print(f"{path.name}: would backfill from {end} to {target:%Y-%m-%d} (~{chunks} request(s))")
             elif last is None:
@@ -55,7 +55,8 @@ def main():
                 else:
                     r = download_missing(ib, symbol, bar_size)
                 span = "empty (no bars received)" if r["first"] is None else f"{r['first']} -> {r['last']}"
-                print(f"{r['path'].name}: +{r['added']} bars, cache {span}")
+                held = f", +{r['holdout_added']} held out" if r.get("holdout_added") else ""
+                print(f"{r['path'].name}: +{r['added']} bars{held}, cache {span}")
     finally:
         ib.disconnect()
 

@@ -245,3 +245,86 @@ def test_backfill_retries_pacing_error(tmp_path, throttle):
     ib = FakeIB(session_bars(5, datetime(2026, 5, 1).date(), now.date()), errors=[PACING])
     run_backfill(ib, tmp_path, throttle, now, days=30)
     assert 15 in ib.sleeps
+
+
+# --- holdout: bars from HOLDOUT_START on go to the holdout folder, never into the cache ---
+
+HOLD_START = pd.Timestamp("2026-04-22")
+NOW = datetime(2026, 10, 21, 18, 3, tzinfo=UTC)
+
+
+@pytest.fixture
+def dirs(tmp_path):
+    """A cache folder with its holdout folder next to it (inside tmp_path, not shared with other tests)."""
+    return tmp_path / "cache", tmp_path / "holdout"
+
+
+def run_symbol(ib, cache_dir, throttle, now=NOW, symbol="SPY"):
+    return download_missing(ib, symbol, "5min", cache_dir=cache_dir, now=now, throttle=throttle)
+
+
+def session_day(df):
+    return df.index.tz_convert("America/New_York").tz_localize(None).normalize()
+
+
+def test_split_holdout_cuts_on_new_york_session_dates():
+    idx = pd.DatetimeIndex(["2026-04-21 19:55", "2026-04-22 13:30", "2026-10-21 19:55"], tz="UTC")
+    df = pd.DataFrame({c: 1.0 for c in cache.COLUMNS}, index=idx)
+    research, held = cache.split_holdout("QQQ", df)
+    assert list(research.index) == [idx[0]] and list(held.index) == list(idx[1:])
+    same, none = cache.split_holdout("AAPL", df)  # other symbols are not held out
+    assert len(same) == 3 and none.empty
+
+
+def test_download_sends_bars_from_the_cutoff_to_the_holdout(dirs, throttle):
+    cache_dir, hold_dir = dirs
+    now = datetime(2026, 5, 6, 18, 3, tzinfo=UTC)  # the 30-day seed window straddles the cutoff
+    times = session_bars(5, datetime(2026, 3, 1).date(), now.date())
+    r = run_symbol(FakeIB(times), cache_dir, throttle, now)
+
+    research = cache.read(cache.cache_path("SPY", "5min", cache_dir))
+    held = cache.read(hold_dir / "SPY_5min.parquet")
+    assert (session_day(research) < HOLD_START).all() and (session_day(held) >= HOLD_START).all()
+    assert r["holdout_added"] == len(held) > 0 and r["added"] == len(research) > 0
+
+
+def test_symbols_outside_the_holdout_stay_whole(dirs, throttle):
+    cache_dir, hold_dir = dirs
+    run_symbol(FakeIB(session_bars(5, datetime(2026, 8, 1).date(), NOW.date())), cache_dir, throttle, symbol="AAPL")
+    assert cache.read(cache.cache_path("AAPL", "5min", cache_dir)).index.max() == pd.Timestamp("2026-10-21 17:55", tz="UTC")
+    assert not hold_dir.exists()
+
+
+def test_second_run_continues_after_the_holdout_not_after_the_cache(dirs, throttle):
+    cache_dir, hold_dir = dirs
+    times = session_bars(5, datetime(2026, 3, 1).date(), datetime(2026, 10, 22).date())
+    run_symbol(FakeIB(times), cache_dir, throttle)
+    ib = FakeIB(times)
+    r = run_symbol(ib, cache_dir, throttle, datetime(2026, 10, 21, 19, 3, tzinfo=UTC))
+
+    assert len(ib.requests) == 1  # otherwise the cache's old end would trigger six months of requests
+    held = cache.read(hold_dir / "SPY_5min.parquet")
+    assert held.index.max() == pd.Timestamp("2026-10-21 18:55", tz="UTC") and held.index.is_unique
+    assert r["added"] == 0 and r["holdout_added"] == 12
+
+
+def test_backfill_from_now_keeps_the_cache_clear_of_the_holdout_window(dirs, throttle):
+    cache_dir, hold_dir = dirs
+    times = session_bars(5, datetime(2025, 1, 1).date(), NOW.date())
+    backfill(FakeIB(times), "SPY", "5min", NOW - timedelta(days=300), cache_dir=cache_dir, now=NOW,
+             throttle=throttle, log=lambda *_: None)
+    research = cache.read(cache.cache_path("SPY", "5min", cache_dir))
+    assert (session_day(research) < HOLD_START).all()
+    assert (session_day(cache.read(hold_dir / "SPY_5min.parquet")) >= HOLD_START).all()
+
+
+def test_backfill_starts_at_the_oldest_known_bar_even_with_no_cache_file(dirs, throttle):
+    cache_dir, hold_dir = dirs
+    times = session_bars(5, datetime(2025, 1, 1).date(), NOW.date())
+    recent = [t for t in times if t.date() >= datetime(2026, 10, 19).date()]
+    held = pd.DataFrame({c: 1.0 for c in cache.COLUMNS}, index=pd.DatetimeIndex(recent, tz="UTC"))
+    cache.merge_and_write(hold_dir / "SPY_5min.parquet", held)  # every bar of this symbol is held out
+    ib = FakeIB(times)
+    backfill(ib, "SPY", "5min", datetime(2026, 10, 12, tzinfo=UTC), cache_dir=cache_dir, now=NOW,
+             throttle=throttle, log=lambda *_: None)
+    assert ib.requests[0] == held.index.min()  # walked back from there, did not refetch the holdout from now

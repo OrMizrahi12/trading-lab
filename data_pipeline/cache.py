@@ -5,13 +5,27 @@ from pathlib import Path
 
 import pandas as pd
 
-from .config import CACHE_DIR
+from .config import CACHE_DIR, HOLDOUT_START, HOLDOUT_SYMBOLS, SESSION_TZ
 
 COLUMNS = ["open", "high", "low", "close", "volume", "average", "barCount"]
 
 
 def cache_path(symbol: str, bar_size: str, cache_dir: Path = CACHE_DIR) -> Path:
     return cache_dir / f"{symbol}_{bar_size}.parquet"
+
+
+def holdout_path(symbol: str, bar_size: str, cache_dir: Path = CACHE_DIR) -> Path:
+    """Where the held-out bars of `symbol` live: a `holdout` folder next to the cache folder."""
+    return cache_dir.parent / "holdout" / f"{symbol}_{bar_size}.parquet"
+
+
+def split_holdout(symbol: str, df: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFrame]:
+    """(bars research may see, bars held out): whole sessions from HOLDOUT_START on go to the second part."""
+    if symbol not in HOLDOUT_SYMBOLS or df.empty:
+        return df, df.iloc[0:0]
+    day = df.index.tz_convert(SESSION_TZ).tz_localize(None).normalize()
+    held = day >= pd.Timestamp(HOLDOUT_START)
+    return df[~held], df[held]
 
 
 def read(path: Path) -> pd.DataFrame | None:
@@ -21,6 +35,12 @@ def read(path: Path) -> pd.DataFrame | None:
 def last_timestamp(path: Path) -> pd.Timestamp | None:
     df = read(path)
     return None if df is None or df.empty else df.index.max()
+
+
+def edge_timestamp(paths: list[Path], newest: bool) -> pd.Timestamp | None:
+    """Newest (or oldest) bar over several files, so a split between cache and holdout hides nothing."""
+    edges = [t for p in paths if (df := read(p)) is not None and not df.empty for t in [df.index.max() if newest else df.index.min()]]
+    return (max if newest else min)(edges) if edges else None
 
 
 def _normalize(df: pd.DataFrame) -> pd.DataFrame:

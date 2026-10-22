@@ -13,6 +13,9 @@ if PORT not in PAPER_PORTS:
     raise RuntimeError(f"Refusing to connect: port {PORT} is not a paper port")
 
 CACHE_DIR = Path(__file__).parent.parent / "data" / "cache"
+HOLDOUT_DIR = CACHE_DIR.parent / "holdout"  # same file names as the cache; research never reads it
+HOLDOUT_START = "2026-04-22"  # first session date (New York) that is held out: the last 6 months at the time of the split
+HOLDOUT_SYMBOLS = frozenset({"QQQ", "SPY"})
 SYMBOLS = ["AAPL", "SPY"]
 WHAT_TO_SHOW = "TRADES"  # prices of actual trades
 USE_RTH = True  # True = regular trading hours only (9:30-16:00 New York)
