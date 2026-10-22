@@ -299,3 +299,76 @@ def test_dry_run_says_the_runner_would_start_without_stop(tmp_path):
 
     text = "\n".join(dry_run_lines(plan_for(date(2026, 10, 23)), CFG, tmp_path))
     assert "runner would start: opening_range_breakout QQQ" in text and "REFUSED" not in text
+
+
+# -- an engines file instead of one pair ------------------------------------------------------------------------------------
+
+def engines_cfg(tmp_path=None):
+    return Config(engines="live/engines.yaml", max_restarts=3)
+
+
+def test_config_may_point_at_an_engines_file(tmp_path):
+    path = tmp_path / "s.yaml"
+    path.write_text("engines: live/engines.yaml\nmax_restarts: 2\n")
+    cfg = load_config(path)
+    assert [p.symbol for p in cfg.pairs] == ["QQQ", "SPY"] and cfg.max_restarts == 2
+    cmd = cfg.runner_cmd()
+    assert cmd[1:4] == ["-m", "live", "--config"] and cmd[4].endswith("live/engines.yaml")
+    assert "--flatten-before-close-min" in cmd and "--strategy" not in cmd
+
+
+@pytest.mark.parametrize("text", ["engines: live/engines.yaml\nstrategy: ema_trend\nsymbol: SPY\n",
+                                  "engines: live/engines.yaml\nsettings: {a: 1}\n",
+                                  "engines: live/nope.yaml\n", "max_restarts: 2\n"])
+def test_config_needs_exactly_one_form(tmp_path, text):
+    path = tmp_path / "s.yaml"
+    path.write_text(text)
+    with pytest.raises(ValueError):
+        load_config(path)
+
+
+def write_state(root, strategy, symbol, **state):
+    d = root / f"{strategy}_{symbol}"
+    d.mkdir(exist_ok=True)
+    (d / "state.json").write_text(json.dumps({"halted": None, "position": None, **state}))
+
+
+def test_a_runner_is_not_restarted_only_when_every_pair_is_halted(tmp_path):
+    from scheduler.jobs import _halted
+
+    cfg = engines_cfg()
+    write_state(tmp_path, "opening_range_breakout", "QQQ", halted="boom")
+    assert _halted(tmp_path, cfg) is None  # SPY is fine: the process may be restarted for it
+    write_state(tmp_path, "donchian_breakout", "SPY", halted="bang")
+    assert "QQQ: boom" in _halted(tmp_path, cfg) and "SPY: bang" in _halted(tmp_path, cfg)
+
+
+def test_report_covers_every_pair_and_a_halt_or_open_position_in_any_of_them(tmp_path):
+    from scheduler.jobs import JobRecord
+
+    plan = plan_for(date(2026, 10, 23))
+    res = DayResult(plan)
+    res.jobs = [JobRecord("runner", plan.runner, plan.runner, plan.stop, "stopped at the stop time")]
+    cfg = engines_cfg()
+    write_state(tmp_path, "opening_range_breakout", "QQQ")
+    write_state(tmp_path, "donchian_breakout", "SPY")
+    text = report.build(res, cfg, tmp_path)
+    assert "Result: OK" in text and "opening_range_breakout QQQ" in text and "donchian_breakout SPY" in text
+    write_state(tmp_path, "donchian_breakout", "SPY", position={"shares": 5, "closed_at": None})
+    assert "Result: NOT FLAT" in report.build(res, cfg, tmp_path) and "5 SPY" in report.build(res, cfg, tmp_path)
+    write_state(tmp_path, "opening_range_breakout", "QQQ", halted="reconcile problem")
+    assert "Result: HALTED" in report.build(res, cfg, tmp_path) and "QQQ: reconcile problem" in report.build(res, cfg, tmp_path)
+
+
+def test_report_points_at_the_daily_log_when_there_is_one(tmp_path):
+    from scheduler.jobs import JobRecord
+
+    plan = plan_for(date(2026, 10, 23))
+    res = DayResult(plan)
+    res.jobs = [JobRecord("runner", plan.runner, plan.runner, plan.stop, "stopped at the stop time")]
+    write_state(tmp_path, "opening_range_breakout", "QQQ")
+    log = tmp_path / "opening_range_breakout_QQQ" / "logs"
+    log.mkdir()
+    (log / "2026-10-23.log").write_text("x\n")
+    text = report.build(res, CFG, tmp_path)
+    assert "logs/2026-10-23.log" in text

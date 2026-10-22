@@ -66,8 +66,10 @@ def connect_paper(ib_factory=IB, host: str = HOST, port: int = PORT, client_id: 
 class Broker:
     """The only way the engine places or cancels orders."""
 
-    def __init__(self, ib, tag: str, dry_run: bool = False, host: str = HOST, port: int = PORT, risk: Risk | None = None):
+    def __init__(self, ib, tag: str, dry_run: bool = False, host: str = HOST, port: int = PORT, risk: Risk | None = None,
+                 on_reject=None):
         self.ib = ib
+        self.on_reject = on_reject  # called as on_reject(text, key) once per refused order (the alert hook)
         self.tag = tag  # orderRef put on every order, so reconcile can tell ours from anyone else's
         self.dry_run = dry_run
         self.risk = risk  # the limits outside the strategy; None only in tests and tools that must not be blocked
@@ -95,9 +97,12 @@ class Broker:
             if logged:
                 code, text = logged[-1].errorCode, logged[-1].message
         reason = f"[{code}] {text}" if code else "no reason given by IB"
+        price = getattr(trade.order, "lmtPrice", 0) or getattr(trade.order, "auxPrice", 0)
         log.error("IB REJECTED order %s %s %s %s @ %s: %s", trade.order.orderId, trade.order.action,
-                  trade.order.totalQuantity, trade.contract.symbol,
-                  getattr(trade.order, "lmtPrice", 0) or getattr(trade.order, "auxPrice", 0), reason)
+                  trade.order.totalQuantity, trade.contract.symbol, price, reason)
+        if self.on_reject is not None:
+            self.on_reject(f"IB rejected {trade.order.action} {trade.order.totalQuantity} {trade.contract.symbol}"
+                           f"{f' @ {price}' if price else ''}: {reason}", f"reject:{trade.order.orderId}")
         return reason
 
     def place(self, contract, order, ref: str | None = None):

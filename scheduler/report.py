@@ -37,36 +37,61 @@ def _hhmm(ts) -> str:
     return "-" if ts is None else f"{ts.tz_convert(NY):%H:%M:%S}"
 
 
-def status(res: DayResult, cfg: Config, root: Path = STATE_DIR) -> tuple[str, list[str]]:
-    """OK, SKIPPED (STOP), HALTED, NOT FLAT or NO RUNNER, with the reasons."""
-    state = {}
+def _state(pair, root: Path) -> dict:
     try:
-        state = json.loads((run_dir(cfg.strategy, cfg.symbol, root) / "state.json").read_text())
+        return json.loads((run_dir(pair.strategy, pair.symbol, root) / "state.json").read_text())
     except (OSError, ValueError):
-        pass
+        return {}
+
+
+def status(res: DayResult, cfg: Config, root: Path = STATE_DIR) -> tuple[str, list[str]]:
+    """OK, SKIPPED (STOP), HALTED, NOT FLAT or NO RUNNER, with the reasons (a halt or an open position in ANY pair counts)."""
+    pairs = cfg.pairs
+    states = {p: _state(p, root) for p in pairs}
     runner = next((j for j in res.jobs if j.name == "runner"), None)
-    pos = state.get("position")
     if res.stop_blocked:
         return "SKIPPED (STOP file)", ["the STOP file exists; the scheduler never removes it"]
     if runner is None or runner.started is None:
         return "NO RUNNER", [runner.result if runner else "the runner job did not run"]
-    if state.get("halted"):
-        return "HALTED", [state["halted"]]
-    if pos and not pos.get("closed_at"):
-        return "NOT FLAT", [f"the state file still shows {pos['shares']} {cfg.symbol}; its stop/target rest at IB; "
-                            "check IB, the next start reconciles"]
+    if halted := [f"{p.symbol}: {st['halted']}" for p, st in states.items() if st.get("halted")]:
+        return "HALTED", halted
+    if open_ := [f"the state file still shows {st['position']['shares']} {p.symbol}; its stop/target rest at IB; "
+                 "check IB, the next start reconciles"
+                 for p, st in states.items() if st.get("position") and not st["position"].get("closed_at")]:
+        return "NOT FLAT", open_
     if runner.result.startswith("stopped early"):
         return "RUNNER STOPPED EARLY", [runner.result]
     return "OK", []
 
 
+def _log_path(rdir: Path, day) -> Path:
+    daily = rdir / "logs" / f"{day}.log"
+    return daily if daily.exists() else rdir / "events.log"
+
+
+def _engine_lines(pair, day, root: Path) -> list[str]:
+    rdir = run_dir(pair.strategy, pair.symbol, root)
+    signals = [r for r in _lines(rdir / "signals.jsonl") if _ny_date(r.get("seen_at")) == day]
+    entries = [r for r in signals if r.get("kind") == "entry"]
+    bought = [r for r in entries if r.get("action") == "bought"]
+    exits = [r for r in signals if r.get("kind") == "exit"]
+    trades = [r for r in _lines(rdir / "trades.jsonl") if _ny_date(r.get("exit_time")) == day]
+    out = [f"{pair.strategy} {pair.symbol} {pair.settings or ''}".rstrip(),
+           f"  decisions logged: {len(signals)} (entries {len(entries)}, bought {len(bought)}, exits {len(exits)})"]
+    for t in trades:
+        pnl = (t["exit_price"] - t["entry_price"]) * t["shares"]
+        out.append(f"  trade: {t['shares']} @ {t['entry_price']:.2f} -> {t['exit_price']:.2f} ({t['reason']}), {pnl:+.2f} before costs")
+    if not trades:
+        out.append("  no closed trades today")
+    out.append(f"  log: {_log_path(rdir, day)}")
+    return out
+
+
 def build(res: DayResult, cfg: Config, root: Path = STATE_DIR) -> str:
     plan, day = res.plan, res.plan.session
     verdict, why = status(res, cfg, root)
-    rdir = run_dir(cfg.strategy, cfg.symbol, root)
     out = [f"# Daily report {day} ({'half day, closes ' + plan.close.tz_convert(NY).strftime('%H:%M') if plan.half_day else 'full day'})",
-           f"Result: {verdict}" + ("".join(f"\n  - {w}" for w in why)),
-           f"Engine: {cfg.strategy} {cfg.symbol} {cfg.settings or ''}", "", "Jobs (New York time)"]
+           f"Result: {verdict}" + ("".join(f"\n  - {w}" for w in why)), "", "Jobs (New York time)"]
     for j in res.jobs:
         out.append(f"  {j.name:<7} planned {_hhmm(j.planned)}  ran {_hhmm(j.started)} -> {_hhmm(j.ended)}  {j.result}"
                    + (f"  [{Path(j.log_path).name}]" if j.log_path else ""))
@@ -79,21 +104,11 @@ def build(res: DayResult, cfg: Config, root: Path = STATE_DIR) -> str:
     except (OSError, ValueError, AttributeError):
         out.append("  no watchlist for today")
 
-    signals = [r for r in _lines(rdir / "signals.jsonl") if _ny_date(r.get("seen_at")) == day]
-    entries = [r for r in signals if r.get("kind") == "entry"]
-    bought = [r for r in entries if r.get("action") == "bought"]
-    exits = [r for r in signals if r.get("kind") == "exit"]
-    trades = [r for r in _lines(rdir / "trades.jsonl") if _ny_date(r.get("exit_time")) == day]
-    out += ["", "Engine",
-            f"  decisions logged: {len(signals)} (entries {len(entries)}, bought {len(bought)}, exits {len(exits)})"]
-    for t in trades:
-        pnl = (t["exit_price"] - t["entry_price"]) * t["shares"]
-        out.append(f"  trade: {t['shares']} @ {t['entry_price']:.2f} -> {t['exit_price']:.2f} ({t['reason']}), {pnl:+.2f} before costs")
-    if not trades:
-        out.append("  no closed trades today")
+    out += ["", "Engines"]
+    for pair in cfg.pairs:
+        out += _engine_lines(pair, day, root)
     refusals = [r for r in _lines(root / "risk_refusals.jsonl") if _ny_date(r.get("time")) == day]
-    out.append(f"  risk refusals today: {len(refusals)}" + ("".join(f"\n    - {r['reason']}" for r in refusals[:3])))
-    out.append(f"  event log: {rdir / 'events.log'}")
+    out.append(f"Risk refusals today: {len(refusals)}" + ("".join(f"\n  - {r['symbol']}: {r['reason']}" for r in refusals[:3])))
     return "\n".join(out) + "\n"
 
 

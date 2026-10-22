@@ -1,6 +1,9 @@
 """uv run -m live --strategy opening_range_breakout --symbol QQQ --set range_minutes=15 [--once] [--dry-run]
+   uv run -m live --config live/engines.yaml [--once] [--dry-run]
 
-Runs ONE strategy on ONE symbol against the IB paper Gateway. Paper trading only: the engine refuses any
+Runs ONE strategy on ONE symbol against the IB paper Gateway, or with --config several (strategy, symbol) pairs in one
+process over one IB connection (client ID 6), each with its own state, the shared risk limits and its own daily log
+file. Alerts go to ntfy.sh if NTFY_TOPIC is set (live/alerts.py). Paper trading only: the engine refuses any
 account that does not start with DU. Nothing here is financial advice.
 """
 
@@ -8,12 +11,16 @@ import argparse
 import logging
 import sys
 
+from .alerts import Alerter
 from .broker import connect_paper, reconnect_paper
 from .config import FLATTEN_BEFORE_CLOSE_MIN, PAPER_PORTS, PORT, STATE_DIR
+from .daily_log import engine_dirs, setup_multi_logging
+from .engines import Pair, load_pairs
 from .kill import main_precheck
+from .multi import MultiRunner
 from .registry import STRATEGIES, parse_settings
 from .risk import Risk
-from .runner import Runner
+from .runner import Link, Runner
 from .state import run_dir
 
 
@@ -35,8 +42,10 @@ def setup_logging(directory) -> None:
 
 def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("--strategy", required=True, choices=sorted(STRATEGIES))
-    ap.add_argument("--symbol", required=True)
+    ap.add_argument("--strategy", choices=sorted(STRATEGIES))
+    ap.add_argument("--symbol")
+    ap.add_argument("--config", metavar="engines.yaml",
+                    help="run every (strategy, symbol) pair in this file in one process (see live/engines.yaml)")
     ap.add_argument("--set", dest="settings", action="append", default=[], metavar="name=value",
                     help="a strategy setting, repeatable (same names as the strategy's params)")
     ap.add_argument("--once", action="store_true", help="one poll, then exit")
@@ -55,6 +64,10 @@ def main() -> None:
     args = ap.parse_args()
     if args.catch_up and not args.dry_run:
         ap.error("--catch-up is for --dry-run only: a real run never trades on history")
+    if args.config and (args.strategy or args.symbol or args.settings):
+        ap.error("--config replaces --strategy, --symbol and --set: put them in the file")
+    if not args.config and not (args.strategy and args.symbol):
+        ap.error("give --strategy and --symbol, or --config")
 
     stopped = main_precheck(STATE_DIR)
     if stopped:  # before anything connects
@@ -65,21 +78,37 @@ def main() -> None:
     except (OSError, ValueError) as e:
         print(f"risk limits: {e}")
         sys.exit(2)
-    settings = parse_settings(args.settings)
-    setup_logging(run_dir(args.strategy, args.symbol, STATE_DIR))
+    try:
+        pairs = (load_pairs(args.config, risk) if args.config
+                 else [Pair(args.strategy, args.symbol, parse_settings(args.settings))])
+    except ValueError as e:
+        print(f"engines: {e}")
+        sys.exit(2)
+    if args.config:
+        setup_multi_logging(engine_dirs(pairs))
+    else:
+        setup_logging(run_dir(pairs[0].strategy, pairs[0].symbol, STATE_DIR))
+    alerter = Alerter.from_env()
     ib = None
     try:
         ib = connect_paper(port=args.port)  # refuses a non-paper port, a remote host or any account not starting with DU
-        Runner(ib, args.strategy, args.symbol, settings, dry_run=args.dry_run, catch_up=args.catch_up,
-               flatten_on_mismatch=args.flatten_on_mismatch, clear_halt=args.clear_halt, risk=risk, port=args.port,
-               flatten_before_close_min=args.flatten_before_close_min,
-               reconnect=lambda: reconnect_paper(ib, port=args.port)).run(once=args.once)
+        link = Link()
+        runners = [Runner(ib, p.strategy, p.symbol, p.settings, dry_run=args.dry_run, catch_up=args.catch_up,
+                          flatten_on_mismatch=args.flatten_on_mismatch, clear_halt=args.clear_halt, risk=risk,
+                          port=args.port, flatten_before_close_min=args.flatten_before_close_min,
+                          alerter=alerter, link=link, reconnect=lambda: reconnect_paper(ib, port=args.port))
+                   for p in pairs]
+        if args.config:
+            MultiRunner(runners).run(once=args.once)
+        else:
+            runners[0].run(once=args.once)
     except KeyboardInterrupt:  # Ctrl+C while connecting; Runner.run handles it once running
         print("\nCtrl+C: stopped before the engine started. Nothing was traded.")
         sys.exit(130)
     finally:
         if ib is not None:
             ib.disconnect()
+        alerter.close()  # let a last alert (a halt, the kill switch) go out before the process ends
 
 
 if __name__ == "__main__":

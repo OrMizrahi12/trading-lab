@@ -22,6 +22,7 @@ import pandas as pd
 import yaml
 
 from live.config import STATE_DIR
+from live.engines import Pair, load_pairs
 from live.kill import main_precheck
 from live.state import run_dir
 
@@ -38,14 +39,25 @@ NO_RESTART_CODES = {2: "risk limits file missing or malformed", 3: "STOP file ex
 
 @dataclass
 class Config:
-    strategy: str
-    symbol: str
+    """One (strategy, symbol), or `engines`: the path of an engines file (live/engines.yaml) with several."""
+
+    strategy: str | None = None
+    symbol: str | None = None
     settings: dict = field(default_factory=dict)
     max_restarts: int = 3
+    engines: str | None = None
+
+    @property
+    def pairs(self) -> list[Pair]:
+        if self.engines:
+            return load_pairs(ROOT / self.engines)
+        return [Pair(self.strategy, self.symbol, self.settings)]
 
     def runner_cmd(self) -> list[str]:
-        cmd = [sys.executable, "-m", "live", "--strategy", self.strategy, "--symbol", self.symbol,
-               "--flatten-before-close-min", str(FLATTEN_BEFORE_CLOSE_MIN)]
+        flatten = ["--flatten-before-close-min", str(FLATTEN_BEFORE_CLOSE_MIN)]
+        if self.engines:
+            return [sys.executable, "-m", "live", "--config", str(ROOT / self.engines), *flatten]
+        cmd = [sys.executable, "-m", "live", "--strategy", self.strategy, "--symbol", self.symbol, *flatten]
         for name, value in self.settings.items():
             cmd += ["--set", f"{name}={value}"]
         return cmd
@@ -53,10 +65,15 @@ class Config:
 
 def load_config(path: Path = CONFIG) -> Config:
     raw = yaml.safe_load(path.read_text()) or {}
-    unknown = set(raw) - {"strategy", "symbol", "settings", "max_restarts"}
-    if unknown or not raw.get("strategy") or not raw.get("symbol"):
-        raise ValueError(f"{path}: needs strategy and symbol, allows settings and max_restarts (got {sorted(raw)})")
-    return Config(raw["strategy"], raw["symbol"], raw.get("settings") or {}, int(raw.get("max_restarts", 3)))
+    unknown = set(raw) - {"strategy", "symbol", "settings", "max_restarts", "engines"}
+    single = bool(raw.get("strategy") and raw.get("symbol"))
+    if unknown or single == bool(raw.get("engines")) or (raw.get("engines") and raw.get("settings")):
+        raise ValueError(f"{path}: needs either strategy and symbol (with optional settings) or engines: <engines file>, "
+                         f"plus optional max_restarts (got {sorted(raw)})")
+    cfg = Config(raw.get("strategy"), raw.get("symbol"), raw.get("settings") or {}, int(raw.get("max_restarts", 3)),
+                 raw.get("engines"))
+    cfg.pairs  # fail now, not at 09:25, if the engines file is bad
+    return cfg
 
 
 class SystemIo:
@@ -132,10 +149,18 @@ def _run_job(io, rec: JobRecord, cmd: list[str], log_path: Path, deadline: pd.Ti
 
 
 def _halted(root: Path, cfg: Config) -> str | None:
-    try:
-        return json.loads((run_dir(cfg.strategy, cfg.symbol, root) / "state.json").read_text()).get("halted")
-    except (OSError, ValueError):
-        return None
+    """Why the runner must not be restarted: every pair is halted. (One halted pair among others stays halted by
+    itself when the process restarts, so the rest can go on.)"""
+    reasons = []
+    for pair in cfg.pairs:
+        try:
+            reason = json.loads((run_dir(pair.strategy, pair.symbol, root) / "state.json").read_text()).get("halted")
+        except (OSError, ValueError):
+            reason = None
+        if not reason:
+            return None
+        reasons.append(f"{pair.symbol}: {reason}")
+    return "; ".join(reasons)
 
 
 def _supervise_runner(io, cfg: Config, plan: DayPlan, res: DayResult, root: Path, log_dir: Path) -> None:

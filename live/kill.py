@@ -22,6 +22,7 @@ from pathlib import Path
 import pandas as pd
 from ib_async import Stock
 
+from .alerts import Alerter
 from .broker import Broker, PaperGuardError, check_paper, connect_paper
 from .config import STATE_DIR
 from .execution import CANCEL_WAIT_S, ExecutionHalt, Executor
@@ -71,7 +72,8 @@ def _our_open(ib):
     return [t for t in ib.openTrades() if t.order.orderRef.startswith(OUR_PREFIX)]
 
 
-def kill(ib, *, root: Path = STATE_DIR, price, out=print, clock=lambda: pd.Timestamp.now(tz="UTC")) -> int:
+def kill(ib, *, root: Path = STATE_DIR, price, out=print, clock=lambda: pd.Timestamp.now(tz="UTC"),
+         alerter: Alerter | None = None) -> int:
     """Run the kill switch. `price(symbol)` gives a reference price for the exit. Returns 0 if flat and clean, else 1."""
     out(f"account   : {', '.join(check_paper(ib))} (paper)")
     _write_stop(root, clock())
@@ -121,6 +123,11 @@ def kill(ib, *, root: Path = STATE_DIR, price, out=print, clock=lambda: pd.Times
     out("check     : " + (f"{len(left_orders)} order(s) of ours still open" if left_orders else "no open orders of ours"))
     out("check     : " + (f"NOT FLAT {not_flat}" if not_flat else f"flat in {sorted(symbols) or 'nothing (no symbol of ours)'}"))
     ok = not (problems or left_orders or not_flat)
+    if alerter is not None:
+        alerter.send("kill", (f"Kill switch done: orders cancelled, flat in {sorted(symbols) or 'nothing'}. STOP is on; "
+                              "nothing trades until it is cleared." if ok else
+                              f"Kill switch FAILED to finish cleanly ({len(problems)} problem(s), {len(left_orders)} open "
+                              f"order(s), not flat: {sorted(not_flat)}). Check IB by hand. STOP is on."))
     out("RESULT    : " + ("OK. STOP exists; remove it with `uv run -m live.kill --clear` to trade again."
                          if ok else "FAILED: check IB by hand. STOP exists."))
     return 0 if ok else 1
@@ -153,6 +160,8 @@ def main() -> None:
     logging.getLogger().addHandler(handler)
     logging.getLogger().setLevel(logging.INFO)
     ib = None
+    alerter = Alerter.from_env()
+    alerter.send("kill", "Kill switch used: STOP written, cancelling our orders and selling our positions.")
     try:
         ib = _connect(print)
         from .feed import BarFeed
@@ -171,13 +180,14 @@ def main() -> None:
                 raise RuntimeError("no price")
             return float(costs[0])
 
-        code = kill(ib, price=price)
+        code = kill(ib, price=price, alerter=alerter)
     except PaperGuardError as e:
         print(f"refused   : {e}")
         code = 2
     finally:
         if ib is not None:
             ib.disconnect()
+        alerter.close()
     sys.exit(code)
 
 

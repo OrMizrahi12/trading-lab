@@ -24,6 +24,7 @@ from ib_async import Stock
 from strategies.base import Entry, Exit
 from strategies.session_clock import SessionClock
 
+from .alerts import NO_ALERTS, Alerter
 from .broker import Broker, PaperGuardError, check_paper
 from .config import (CLIENT_ID, FLATTEN_BEFORE_CLOSE_MIN, HOLE_WAIT_MIN, HOST, LOOKBACK_BARS, MAX_SIGNAL_AGE_MIN,
                      MAX_TICK_ERRORS, POLL_SECONDS, PORT, RECONNECT_ATTEMPTS, RECONNECT_WAIT_S, STATE_DIR)
@@ -40,6 +41,15 @@ from .step import step, window
 log = logging.getLogger("live")
 
 
+class Link:
+    """What several runners on ONE IB connection share: how many times it has been re-made. A runner that has not
+    yet checked its state against IB since the latest reconnect does so on its next poll, even if another runner
+    was the one that brought the connection back."""
+
+    def __init__(self):
+        self.epoch = 0
+
+
 class Runner:
     def __init__(self, ib, name: str, symbol: str, settings: dict, *, strategy=None, dry_run: bool = False,
                  root: Path = STATE_DIR, clock=utc_now, feed: BarFeed | None = None, executor: Executor | None = None,
@@ -47,11 +57,18 @@ class Runner:
                  clear_halt: bool = False, hole_wait_min: int = HOLE_WAIT_MIN,
                  max_signal_age_min: int = MAX_SIGNAL_AGE_MIN, flatten_before_close_min: int = FLATTEN_BEFORE_CLOSE_MIN,
                  lookback: int = LOOKBACK_BARS, contract=None, risk: Risk | None = None, reconnect=None,
-                 reconnect_attempts: int = RECONNECT_ATTEMPTS, reconnect_wait_s: float = RECONNECT_WAIT_S, port: int = PORT):
+                 reconnect_attempts: int = RECONNECT_ATTEMPTS, reconnect_wait_s: float = RECONNECT_WAIT_S, port: int = PORT,
+                 alerter: Alerter | None = None, link: Link | None = None):
         self.ib, self.name, self.symbol, self.dry_run, self.clock = ib, name, symbol, dry_run, clock
         self.contract = contract or Stock(symbol, "SMART", "USD")
         self.tag = f"live:{name}:{symbol}"
-        self.broker = Broker(ib, self.tag, dry_run=dry_run, risk=risk, port=port)
+        self.label = f"{symbol} {name}"  # who an alert or a console line is about
+        self.alerter = alerter or NO_ALERTS
+        self.link = link or Link()
+        self._seen_epoch = self.link.epoch
+        self._exit_alerted: set[str] = set()  # entry times whose exit has been alerted: one alert per trade
+        self.broker = Broker(ib, self.tag, dry_run=dry_run, risk=risk, port=port,
+                             on_reject=lambda text, key: self._alert("reject", f"{self.label}: {text}", key))
         self.dir = run_dir(name, symbol, root)
         self.state_path = self.dir / ("state_dryrun.json" if dry_run else "state.json")
         self.key = settings_key(name, symbol, settings)
@@ -102,6 +119,8 @@ class Runner:
             if not self.clear_halt:
                 log.error("start: halted since the last run (%s). Check IB, then restart with --clear-halt.",
                           self.state.halted)
+                self._alert("halt", f"{self.label} is still HALTED from the last run and will not trade: {self.state.halted}",
+                            key=f"halt:{self.label}")
                 self._save()
                 return
             log.warning("start: previous halt (%s) cleared by --clear-halt", self.state.halted)
@@ -151,10 +170,27 @@ class Runner:
         self.executor.exit(stray, self._ref_price())
         return reconcile(self.ib, self.broker, self.state)
 
+    def _alert(self, kind: str, text: str, key: str | None = None) -> None:
+        """Push alert (ntfy). Never for routine bars; never from a dry run, which sends nothing real."""
+        if not self.dry_run:
+            self.alerter.send(kind, text, key=key)
+
+    def _alert_exit(self, pos: PositionState, price: float | None, reason: str) -> None:
+        if pos.entry_time in self._exit_alerted:
+            return
+        self._exit_alerted.add(pos.entry_time)
+        if price is None:
+            self._alert("fill", f"{self.label}: position closed ({reason}), price not known")
+        else:
+            self._alert("fill", f"{self.label}: SOLD {pos.shares} @ {price:.2f} ({reason}), "
+                                f"{(price - pos.entry_price) * pos.shares:+.2f} before costs")
+
     def _halt(self, reason: str) -> None:
         log.error("HALT: %s", reason)
         self.state.halted = reason
         self._save()
+        self._alert("halt", f"{self.label} HALTED, it trades nothing more until you check IB and restart: {reason}",
+                    key=f"halt:{self.label}")
 
     def _save(self) -> None:
         save(self.state_path, self.state)
@@ -175,6 +211,8 @@ class Runner:
             log.error("STOP file %s found: no more trading", self.stop_file)
             say(f"STOP      : {self.stop_file} exists (kill switch). Nothing more will be traded; the runner exits. "
                 "Remove the file to allow trading again.")
+            self._alert("kill", "Kill switch: the STOP file exists. Trading has stopped; no new buys until it is removed.",
+                        key="kill")
             self._save()
         return True
 
@@ -196,26 +234,41 @@ class Runner:
         state file against IB's positions and open orders. A problem there, a non-paper account on the new
         connection, or no connection at all halts; a clean result carries on. Orders resting at IB (the stop and
         target are GTC) kept protecting the position while we were away. Without a `reconnect` callable this does nothing.
+
+        Runners that share one connection (`Link`) each do their own reconcile after a reconnect, also when another
+        runner was the one that brought the connection back.
         """
-        if self.reconnect is None or self.ib.isConnected():
+        if self.reconnect is None:
             return
-        log.error("connection to IB lost")
-        say("CONNECTION: lost. Reconnecting; nothing is traded until the state has been checked against IB again.")
-        for attempt in range(1, self.reconnect_attempts + 1):
-            try:
-                self.reconnect()
-                break
-            except PaperGuardError as e:
-                self._halt(f"paper guard on reconnect: {e}")
-                return
-            except Exception as e:
-                log.warning("reconnect attempt %d of %d failed: %s", attempt, self.reconnect_attempts, e)
-                say(f"CONNECTION: attempt {attempt} of {self.reconnect_attempts} failed ({type(e).__name__}: {e})")
-                self._pause(self.reconnect_wait_s)
+        connected = self.ib.isConnected()
+        if connected and self._seen_epoch == self.link.epoch:
+            return
+        if connected:
+            say("CONNECTION: back (another engine reconnected). Checking this state against IB.")
         else:
-            self._halt(f"connection to IB lost and {self.reconnect_attempts} reconnect attempts failed")
-            return
-        say("CONNECTION: back. Checking the state against IB.")
+            log.error("connection to IB lost")
+            say("CONNECTION: lost. Reconnecting; nothing is traded until the state has been checked against IB again.")
+            self._alert("connection", "Lost the connection to the IB Gateway. Reconnecting; nothing is traded until "
+                                      "the state has been checked.", key="connection-lost")
+            for attempt in range(1, self.reconnect_attempts + 1):
+                try:
+                    self.reconnect()
+                    break
+                except PaperGuardError as e:
+                    self._halt(f"paper guard on reconnect: {e}")
+                    return
+                except Exception as e:
+                    log.warning("reconnect attempt %d of %d failed: %s", attempt, self.reconnect_attempts, e)
+                    say(f"CONNECTION: attempt {attempt} of {self.reconnect_attempts} failed ({type(e).__name__}: {e})")
+                    self._pause(self.reconnect_wait_s)
+            else:
+                self._halt(f"connection to IB lost and {self.reconnect_attempts} reconnect attempts failed")
+                return
+            self.link.epoch += 1
+            self.alerter.reset("connection-lost")
+            self._alert("connection", "Connection to the IB Gateway is back. Checking the state against IB.")
+            say("CONNECTION: back. Checking the state against IB.")
+        self._seen_epoch = self.link.epoch
         self.ib.qualifyContracts(self.contract)
         res = reconcile(self.ib, self.broker, self.state)
         self._report(res)
@@ -307,6 +360,7 @@ class Runner:
             return
         pos.closed_at, pos.exit_price, pos.exit_reason = self._closing_info(pos, now)
         log.info("sync: IB closed the position (%s) at %s", pos.exit_reason, pos.closed_at)
+        self._alert_exit(pos, pos.exit_price, pos.exit_reason)
         self._save()
 
     def _closing_info(self, pos: PositionState, now: pd.Timestamp) -> tuple[str, float | None, str]:
@@ -325,7 +379,7 @@ class Runner:
         pos = st.position
         if pos is not None and pos.closed_at and pd.Timestamp(pos.closed_at) < bar_close:
             self._record_trade(pos, exit_time=pd.Timestamp(pos.closed_at), exit_price=pos.exit_price,
-                               reason=pos.exit_reason)
+                               reason=pos.exit_reason, alert=False)  # alerted when IB closed it (see _sync_position)
             st.position = None
         bars = window(closed, ts, self.lookback)
         intent = step(self.strategy, bars, st.position)
@@ -366,6 +420,7 @@ class Runner:
                 record["action"] = f"skipped: risk: {refused.reason}"
                 self._append("signals.jsonl", record)
                 self._save()
+                self._alert("reject", f"{self.label}: entry refused by the risk limits: {refused.reason}")
                 return f"ENTRY signal ({intent.reason}, stop {intent.stop:.2f}) -> REFUSED by the risk limits: {refused.reason}"
             except DuplicateEntry as dup:
                 record["action"] = f"skipped: already sent ({order_ref})"
@@ -386,6 +441,8 @@ class Runner:
                                         stop=intent.stop, target=record["target"], stop_order_id=entered.stop_order_id,
                                         target_order_id=entered.target_order_id)
             self._save()  # the position exists at IB now: write it down before anything else can fail
+            self._alert("fill", f"{self.label}: BOUGHT {fill.shares} @ {fill.price:.2f}, stop {intent.stop:.2f}, "
+                                f"target {record['target'] or 'none'}")
             if fill.price <= intent.stop:  # the backtester drops an entry whose fill is not above the stop; so do we
                 self._abort_entry(f"filled at {fill.price}, not above the stop {intent.stop}", ref, now)
                 return f"{signal} -> bought {fill.shares} @ {fill.price:.2f}, not above the stop: sold again"
@@ -483,7 +540,9 @@ class Runner:
         self.state.position = None
         self._save()
 
-    def _record_trade(self, pos: PositionState, *, exit_time, exit_price, reason, fill_time=None) -> None:
+    def _record_trade(self, pos: PositionState, *, exit_time, exit_price, reason, fill_time=None, alert: bool = True) -> None:
+        if alert:
+            self._alert_exit(pos, exit_price, reason)
         self._append("trades.jsonl", {
             "entry_time": pos.entry_time, "entry_price": pos.entry_price, "shares": pos.shares,
             "stop": pos.stop, "target": pos.target, "exit_time": exit_time, "exit_price": exit_price,
