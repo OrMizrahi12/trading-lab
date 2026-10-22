@@ -233,16 +233,24 @@ def test_entry_that_fills_at_or_below_the_stop_is_sold_at_once_like_the_backtest
     runner.tick()
     assert runner.state.position is None and ib.holdings["QQQ"] == 0 and not runner.state.halted
     assert lines(runner, "trades.jsonl")[0]["reason"] == "entry_aborted"
-    assert not any(o.orderType == "STP" for _, o in ib.placed)
+    assert not any(t.order.orderType == "STP" for t in ib.openTrades())  # the bracket's stop was cancelled again
 
 
 def test_rejected_protection_sells_the_position_and_halts(tmp_path):
-    ib, runner, _ = make(tmp_path, {"10:05": ENTRY}, f"{DAY1} 10:12", last_bar="10:00")
-    ib.reject_types = {"STP"}
+    ib, runner, _ = make(tmp_path, {"10:05": Entry(stop=99.0, target=105.0, reason="go")}, f"{DAY1} 10:12", last_bar="10:00")
+    ib.reject_types = {"STP"}  # IB keeps the target but refuses the stop: the buy fills, unprotected
     runner.start()
     runner.tick()
     assert runner.state.position is None and ib.holdings["QQQ"] == 0
     assert "protection failed" in runner.state.halted
+
+
+def test_a_bracket_whose_stop_is_refused_before_the_buy_goes_live_halts_instead_of_dropping_quietly(tmp_path):
+    ib, runner, _ = make(tmp_path, {"10:05": ENTRY}, f"{DAY1} 10:12", last_bar="10:00")
+    ib.reject_types = {"STP"}
+    runner.start()
+    runner.tick()
+    assert "refused the stop" in runner.state.halted and ib.holdings["QQQ"] == 0 and ib.openTrades() == []
 
 
 def test_entry_cancel_not_confirmed_halts_the_runner(tmp_path):
@@ -251,7 +259,7 @@ def test_entry_cancel_not_confirmed_halts_the_runner(tmp_path):
     runner.start()
     runner.tick()
     assert "not confirmed cancelled" in runner.state.halted
-    assert len(ib.placed) == 1  # no second order, no stop on top of an unknown position
+    assert [o.action + o.orderType for _, o in ib.placed] == ["BUYLMT", "SELLSTP"]  # the bracket, nothing on top
 
 
 def test_a_late_bar_is_waited_for_then_stepped_past_after_the_grace_period(tmp_path):

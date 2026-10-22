@@ -65,6 +65,10 @@ class LiveState:
     last_bar_ts: str | None = None  # start of the last closed bar already stepped (ISO UTC)
     position: PositionState | None = None
     halted: str | None = None  # why the engine stopped trading, if it did
+    # Written BEFORE an entry bracket is sent, cleared when its outcome is in `position`: if the runner dies in
+    # between, the next start's reconcile finds the entry at IB through this record (ref, shares, stop, target).
+    pending_entry: dict | None = None
+    sent_refs: list[str] = field(default_factory=list)  # entry refs sent in the last sessions: never sent again
     version: int = VERSION
     extra: dict = field(default_factory=dict)
 

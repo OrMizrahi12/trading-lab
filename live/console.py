@@ -4,6 +4,7 @@ import logging
 
 import pandas as pd
 
+from .refs import owns
 from .state import PositionState
 
 NY = "America/New_York"
@@ -37,5 +38,5 @@ def order_text(trade, tag: str) -> str:
     order = trade.order
     kind = getattr(order, "orderType", "")
     price = getattr(order, "lmtPrice", 0) or getattr(order, "auxPrice", 0)
-    owner = "ours" if order.orderRef == tag else f"NOT ours ({order.orderRef or 'no ref'})"
+    owner = "ours" if owns(tag, order.orderRef) else f"NOT ours ({order.orderRef or 'no ref'})"
     return f"#{order.orderId} {order.action} {kind} {order.totalQuantity}{f' @ {price}' if price else ''} [{owner}]"

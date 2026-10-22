@@ -87,3 +87,17 @@ def test_position_gone_at_ib_sets_state_flat():
     ib, broker, state = make(shares_state=10, shares_ib=0)
     res = reconcile(ib, broker, state)
     assert res.ok and state.position is None and ib.placed == []
+
+
+def test_orders_with_an_entry_ref_are_ours_but_another_strategys_are_not():
+    ib, broker, state = make(shares_state=10, shares_ib=10, orders=[(1, TAG + ":2026-03-02:1000", "SELL")])
+    assert reconcile(ib, broker, state).ok and ib.cancelled == []
+    ib, broker, state = make(orders=[(5, "live:ema_trend:QQQ2:2026-03-02:1000", "BUY")])
+    res = reconcile(ib, broker, state)
+    assert not res.ok and ib.cancelled == []  # a tag that merely starts the same is someone else's
+
+
+def test_a_stop_still_sized_for_the_whole_entry_after_a_partial_fill_is_replaced():
+    ib, broker, state = make(shares_state=5, shares_ib=5, orders=[(1, TAG, "SELL")])  # fake orders are 10 shares
+    res = reconcile(ib, broker, state)
+    assert res.ok and res.needs_protection and len(ib.cancelled) == 1

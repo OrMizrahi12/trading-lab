@@ -27,9 +27,10 @@ from .broker import Broker, PaperGuardError, check_paper
 from .config import (CLIENT_ID, FLATTEN_BEFORE_CLOSE_MIN, HOLE_WAIT_MIN, HOST, LOOKBACK_BARS,
                      MAX_SIGNAL_AGE_MIN, MAX_TICK_ERRORS, POLL_SECONDS, PORT, STATE_DIR)
 from .console import bar_line, position_text, say
-from .execution import ExecutionHalt, Executor, utc_now
+from .execution import DuplicateEntry, ExecutionHalt, Executor, utc_now
 from .feed import BAR, NY, BarFeed
 from .reconcile import ib_shares, reconcile
+from .refs import entry_ref, owns
 from .registry import build
 from .state import LiveState, PositionState, load, lock, run_dir, save, settings_key
 from .step import step, window
@@ -227,7 +228,7 @@ class Runner:
     def _closing_info(self, pos: PositionState, now: pd.Timestamp) -> tuple[str, float | None, str]:
         for trade in self.ib.trades():
             oid = trade.order.orderId
-            if (oid in (pos.stop_order_id, pos.target_order_id) and trade.order.orderRef == self.tag
+            if (oid in (pos.stop_order_id, pos.target_order_id) and owns(self.tag, trade.order.orderRef)
                     and trade.orderStatus.status == "Filled"):
                 when = trade.fills[-1].execution.time if trade.fills else None
                 when = now if when is None else pd.Timestamp(when)
@@ -271,19 +272,35 @@ class Runner:
                 self._append("signals.jsonl", record)
                 log.info("signal %s entry skipped: %s", ts, record["action"])
                 return f"ENTRY signal ({intent.reason}, stop {intent.stop:.2f}) -> {record['action']}"
-            fill = self.executor.buy(shares, ref)
+            order_ref = entry_ref(self.tag, ts)
+            try:
+                entered = self.executor.enter(
+                    order_ref, shares, ref, intent.stop, record["target"], known_refs=st.sent_refs,
+                    before_send=lambda: self._write_ahead(order_ref, shares, intent, record["target"], ts, bar_close))
+            except DuplicateEntry as dup:
+                record["action"] = f"skipped: already sent ({order_ref})"
+                self._append("signals.jsonl", record)
+                if dup.in_ib:  # IB shows it, the state file does not: a person must look
+                    raise ExecutionHalt(f"entry {order_ref} is already at IB but the state has no position: {dup.found}")
+                return f"ENTRY signal ({intent.reason}) -> already sent as {order_ref}, not sending again"
+            fill = entered.fill if entered else None
+            if not self.dry_run:
+                st.pending_entry = None  # the outcome is known: it goes into `position` (or nowhere) below
             record["action"] = "bought" if fill else "not filled" if not self.dry_run else "dry run"
             self._append("signals.jsonl", record)
             signal = f"ENTRY signal ({intent.reason}, stop {intent.stop:.2f}, target {record['target'] or 'none'})"
             if fill is None:
+                self._save()
                 return f"{signal} -> {record['action']}" + ("" if self.dry_run else f", {shares} shares not filled in time")
             st.position = PositionState(shares=fill.shares, entry_time=bar_close.isoformat(), entry_price=fill.price,
-                                        stop=intent.stop, target=record["target"])
+                                        stop=intent.stop, target=record["target"], stop_order_id=entered.stop_order_id,
+                                        target_order_id=entered.target_order_id)
             self._save()  # the position exists at IB now: write it down before anything else can fail
             if fill.price <= intent.stop:  # the backtester drops an entry whose fill is not above the stop; so do we
                 self._abort_entry(f"filled at {fill.price}, not above the stop {intent.stop}", ref, now)
                 return f"{signal} -> bought {fill.shares} @ {fill.price:.2f}, not above the stop: sold again"
-            self._protect_or_flatten(st.position, ref, now)
+            if not entered.protected:  # IB refused the bracket's stop: place the pair on its own, or sell
+                self._protect_or_flatten(st.position, ref, now)
             self._save()
             if st.position is None:
                 return f"{signal} -> bought {fill.shares} @ {fill.price:.2f}, protection failed: sold again"
@@ -305,6 +322,18 @@ class Runner:
             outcome = f"{signal} -> nothing left to sell, already closed by the {why}"
         st.position = None
         return outcome
+
+    def _write_ahead(self, order_ref: str, shares: int, intent: Entry, target: float | None,
+                     ts: pd.Timestamp, bar_close: pd.Timestamp) -> None:
+        """Write the entry's intent to disk before the bracket is sent, so a restart can find it at IB."""
+        if self.dry_run:
+            return
+        st = self.state
+        today = order_ref.rsplit(":", 2)[1]  # keep the refs of the last session only; older ones cannot collide
+        st.sent_refs = [r for r in st.sent_refs if r.rsplit(":", 2)[1] == today] + [order_ref]
+        st.pending_entry = {"ref": order_ref, "shares": shares, "stop": intent.stop, "target": target,
+                            "signal_bar": ts.isoformat(), "entry_time": bar_close.isoformat()}
+        self._save()
 
     def _protect_or_flatten(self, pos: PositionState, ref: float, now: pd.Timestamp | None = None) -> None:
         """Rest the stop/target at IB. If that fails, sell the position at once and halt: never run unprotected."""

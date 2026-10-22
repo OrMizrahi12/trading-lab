@@ -3,14 +3,16 @@
 from types import SimpleNamespace
 
 import pytest
+from ib_async import LimitOrder
 
 from live.broker import Broker
-from live.execution import Executor, ExecutionHalt
+from live.execution import DuplicateEntry, Executor, ExecutionHalt
 from live.state import PositionState
 from strategies.base import Entry
 from tests.fake_ib import FakeIB
 
 TAG = "live:ema_trend:QQQ"
+REF = TAG + ":2026-03-02:1000"  # one entry signal: session date and signal bar start
 QQQ = SimpleNamespace(symbol="QQQ")
 
 
@@ -52,31 +54,120 @@ def test_size_is_zero_when_the_stop_is_not_below_the_price():
     assert ex.size(Entry(stop=100.5, target=float("inf")), 100.0) == 0
 
 
-# -- entry -------------------------------------------------------------------------------
+# -- entry: one bracket --------------------------------------------------------------------
 
-def test_buy_is_a_limit_through_the_market_and_fills_at_the_market():
+def test_entry_is_one_bracket_parent_limit_plus_stop_sent_together():
     ib, ex = make()
     ib.market_price = 100.0
-    fill = ex.buy(10, 100.0)
-    assert (fill.shares, fill.price) == (10, 100.0)
-    (order,) = orders(ib)
-    assert order.action == "BUY" and order.lmtPrice == 100.5 and order.tif == "DAY" and order.orderRef == TAG
-    assert ib.holdings["QQQ"] == 10
+    got = ex.enter(REF, 10, 100.0, stop=99.0)
+    parent, stop = orders(ib)
+    assert (parent.action, parent.lmtPrice, parent.tif, parent.transmit) == ("BUY", 100.5, "DAY", False)
+    assert (stop.orderType, stop.auxPrice, stop.parentId, stop.transmit, stop.tif) == ("STP", 99.0, parent.orderId, True, "GTC")
+    assert {o.orderRef for o in orders(ib)} == {REF}  # every leg carries the idempotent ref
+    assert (got.fill.shares, got.fill.price) == (10, 100.0) and got.stop_order_id == stop.orderId
+    assert got.target_order_id is None and got.protected and ib.holdings["QQQ"] == 10
+    assert [t.orderStatus.status for t in ib._trades] == ["Filled", "Submitted"]  # the stop is live, waiting for a hit
 
 
-def test_buy_that_does_not_fill_is_cancelled_and_dropped():
+def test_entry_with_a_target_is_a_bracket_with_an_oca_pair_and_one_transmit():
+    ib, ex = make()
+    ib.market_price = 100.0
+    got = ex.enter(REF, 10, 100.0, stop=99.0, target=105.0)
+    parent, stop, target = orders(ib)
+    assert [o.transmit for o in (parent, stop, target)] == [False, False, True]  # the last order sends all three
+    assert stop.parentId == target.parentId == parent.orderId
+    assert stop.ocaGroup == target.ocaGroup != "" and stop.ocaType == target.ocaType == 1
+    assert (target.orderType, target.lmtPrice, target.tif) == ("LMT", 105.0, "GTC")
+    assert (got.stop_order_id, got.target_order_id) == (stop.orderId, target.orderId)
+    ib.trigger(ib._trades[1], 99.0)  # the stop is hit: IB cancels the target
+    assert ib.holdings["QQQ"] == 0 and ib.openTrades() == []
+
+
+def test_nothing_is_live_until_the_last_order_of_the_bracket_is_sent():
+    ib, ex = make()
+    ib.market_price = 100.0
+    seen = []
+    real = ib.placeOrder
+    ib.placeOrder = lambda c, o: (seen.append(ib.holdings.get("QQQ", 0)), real(c, o))[1]
+    ex.enter(REF, 10, 100.0, stop=99.0, target=105.0)
+    assert seen == [0, 0, 0] and ib.holdings["QQQ"] == 10  # no fill before the whole bracket was out
+
+
+def test_entry_that_does_not_fill_is_cancelled_with_its_children_and_dropped():
     ib, ex = make()
     ib.market_price, ib.freeze = 100.0, True
-    assert ex.buy(10, 100.0) is None
+    assert ex.enter(REF, 10, 100.0, stop=99.0, target=105.0) is None
     assert len(ib.cancelled) == 1 and ib.openTrades() == [] and ib.holdings.get("QQQ", 0) == 0
 
 
-def test_partial_entry_keeps_what_filled_and_cancels_the_rest():
+def test_partial_entry_sizes_the_children_to_what_filled_and_cancels_the_rest():
     ib, ex = make()
     ib.market_price, ib.fill_fraction = 100.0, 0.5
-    fill = ex.buy(10, 100.0)
-    assert fill.shares == 5 and ib.holdings["QQQ"] == 5
-    assert len(ib.cancelled) == 1 and ib.openTrades() == []
+    got = ex.enter(REF, 10, 100.0, stop=99.0, target=105.0)
+    assert got.fill.shares == 5 and ib.holdings["QQQ"] == 5
+    live = ib.openTrades()
+    assert sorted(t.order.orderType for t in live) == ["LMT", "STP"]
+    assert [t.order.totalQuantity for t in live] == [5, 5]
+    assert len(ib._trades) == 3  # the children were modified under their own ids, not replaced
+    assert [t.order.orderId for t in live] == [got.stop_order_id, got.target_order_id]
+
+
+def test_a_refused_stop_leaves_no_half_built_bracket_and_the_caller_is_told():
+    ib, ex = make()
+    ib.market_price, ib.reject_types = 100.0, {"STP"}
+    got = ex.enter(REF, 10, 100.0, stop=99.0, target=105.0)
+    assert got.fill.shares == 10 and not got.protected and got.stop_order_id is None and got.target_order_id is None
+    assert ib.openTrades() == []  # the accepted target was cancelled again
+
+
+# -- the same ref is never sent twice ---------------------------------------------------------
+
+def test_a_ref_that_filled_is_not_sent_again_even_by_a_restarted_process():
+    ib, ex = make()
+    ib.market_price = 100.0
+    ex.enter(REF, 10, 100.0, stop=99.0)
+    sent = len(ib.placed)
+    ib.restart()  # new process: done orders are gone from its session list; IB still has the executions
+    again = Executor(ib, Broker(ib, TAG), QQQ, timeout_s=2)
+    with pytest.raises(DuplicateEntry) as dup:
+        again.enter(REF, 10, 100.0, stop=99.0)
+    assert dup.value.in_ib and "execution today: BOT 10" in str(dup.value) and len(ib.placed) == sent
+
+
+def test_a_ref_resting_at_ib_is_not_sent_again():
+    ib, ex = make()
+    ib.market_price, ib.freeze = 100.0, True
+    ex.broker.place(QQQ, LimitOrder("BUY", 10, 100.5), REF)  # sent, not filled
+    with pytest.raises(DuplicateEntry, match="open order"):
+        ex.enter(REF, 10, 100.0, stop=99.0)
+    assert len(ib.placed) == 1
+
+
+def test_a_ref_only_the_state_file_knows_is_not_sent_either():
+    ib, ex = make()
+    ib.market_price = 100.0
+    with pytest.raises(DuplicateEntry) as dup:
+        ex.enter(REF, 10, 100.0, stop=99.0, known_refs=[REF])
+    assert not dup.value.in_ib and ib.placed == []
+
+
+def test_another_signal_bar_has_another_ref_and_is_sent():
+    ib, ex = make()
+    ib.market_price = 100.0
+    ex.enter(REF, 5, 100.0, stop=99.0)
+    ib.holdings["QQQ"] = 0
+    assert ex.enter(TAG + ":2026-03-02:1005", 5, 100.0, stop=99.0) is not None
+
+
+def test_the_intent_is_written_after_the_duplicate_check_and_before_the_first_order():
+    ib, ex = make()
+    ib.market_price = 100.0
+    marks = []
+    ex.enter(REF, 10, 100.0, stop=99.0, before_send=lambda: marks.append(len(ib.placed)))
+    assert marks == [0]
+    with pytest.raises(DuplicateEntry):
+        ex.enter(REF, 10, 100.0, stop=99.0, before_send=lambda: marks.append("again"))
+    assert marks == [0]
 
 
 # -- protection --------------------------------------------------------------------------
@@ -161,7 +252,7 @@ def test_dry_run_sends_nothing():
     ib.market_price = 100.0
     ib.holdings["QQQ"] = 10
     pos = position(target=105.0)
-    assert ex.buy(10, 100.0) is None
+    assert ex.enter(REF, 10, 100.0, stop=99.0, target=105.0) is None
     ex.protect(pos)
     assert ex.exit(pos, 100.0) is None
     assert ib.placed == [] and pos.stop_order_id is None
@@ -177,8 +268,8 @@ def test_entry_cancel_that_is_not_confirmed_halts_instead_of_reading_it_as_unfil
     ib, ex = make()
     ib.market_price, ib.freeze, ib.slow_cancel = 100.0, True, True
     with pytest.raises(ExecutionHalt, match="not confirmed cancelled"):
-        ex.buy(10, 100.0)
-    assert len(orders(ib)) == 1  # nothing else was sent on top
+        ex.enter(REF, 10, 100.0, stop=99.0)
+    assert [o.orderType for o in orders(ib)] == ["LMT", "STP"]  # the bracket, nothing else on top
 
 
 def test_exit_never_has_two_sells_live_when_a_cancel_is_slow():

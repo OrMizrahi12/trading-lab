@@ -21,6 +21,7 @@ from strategies.base import Entry
 from .broker import Broker
 from .config import EXIT_MAX_REPRICES, LIMIT_OFFSET_PCT, ORDER_TIMEOUT_S
 from .reconcile import ib_shares
+from .refs import evidence, owns
 from .state import PositionState
 
 log = logging.getLogger("live")
@@ -38,6 +39,26 @@ class Fill:
     shares: int
     price: float  # average fill price
     time: pd.Timestamp
+
+
+class DuplicateEntry(RuntimeError):
+    """This entry's orderRef is already known: it was sent before, so it is not sent again."""
+
+    def __init__(self, ref: str, found: list[str], in_ib: bool):
+        super().__init__(f"{ref} was already sent: {'; '.join(found)}")
+        self.ref, self.found, self.in_ib = ref, found, in_ib  # in_ib: IB itself shows it (not only our state file)
+
+
+@dataclass(frozen=True)
+class Entered:
+    """A filled entry bracket. The ids are None for a leg IB did not keep (then the caller must re-protect)."""
+    fill: Fill
+    stop_order_id: int | None
+    target_order_id: int | None
+
+    @property
+    def protected(self) -> bool:
+        return self.stop_order_id is not None
 
 
 def utc_now() -> pd.Timestamp:
@@ -100,6 +121,11 @@ class Executor:
         trade = self.broker.place(self.contract, order)
         if trade is None:  # dry run
             return None
+        return self._finish(trade, action, shares)
+
+    def _finish(self, trade, action: str, shares: int) -> Fill | None:
+        """Wait for a marketable limit, cancel what is left after the timeout, return what filled (or None)."""
+        order = trade.order
         self._wait(trade, self.timeout_s)
         if not trade.isDone():
             log.warning("exec: %s %d %s did not finish in %ss, cancelling", action, shares, self.contract.symbol, self.timeout_s)
@@ -113,14 +139,86 @@ class Executor:
             return None
         return Fill(filled, float(trade.orderStatus.avgFillPrice), self.clock())
 
-    def buy(self, shares: int, ref: float) -> Fill | None:
-        """Entry. An order that does not fill in time is cancelled and dropped, as the backtester drops it."""
-        fill = self._send("BUY", shares, ref)
+    # -- entry: one bracket ----------------------------------------------------------------
+
+    def enter(self, order_ref: str, shares: int, ref_price: float, stop: float, target: float | None = None, *,
+              known_refs=(), before_send=None) -> Entered | None:
+        """Send ONE bracket: the marketable limit buy (parent) plus its stop and optional target (OCA children).
+
+        The three orders go to IB together and carry `order_ref`. Before anything is sent, IB's open orders, today's
+        executions and this session's orders (and `known_refs`, the refs in the state file) are searched for the
+        ref: a hit raises DuplicateEntry and nothing is sent. `before_send` runs after that check and before the
+        first order, so the caller can write the intent down first.
+
+        Returns None when nothing filled (the parent is cancelled after the timeout, and IB drops the children with
+        it). Otherwise the children are made to match the shares that actually filled and the ids come back.
+        """
+        if self.broker.dry_run:
+            log.info("DRY RUN: would place a bracket %s %d %s stop %.2f target %s", order_ref, shares,
+                     self.contract.symbol, stop, target)
+            return None
+        found = evidence(self.ib, order_ref)
+        in_ib = bool(found)
+        if order_ref in known_refs:
+            found.append("the state file says it was sent")
+        if found:
+            raise DuplicateEntry(order_ref, found, in_ib)
+        if before_send is not None:
+            before_send()
+
+        has_target = target is not None
+        parent = LimitOrder("BUY", shares, self._limit("BUY", ref_price), tif="DAY", transmit=False)
+        children = [StopOrder("SELL", shares, round(stop, 2), tif="GTC", transmit=not has_target)]  # GTC: survives a dead runner
+        if has_target:
+            children.append(LimitOrder("SELL", shares, round(target, 2), tif="GTC", transmit=True))  # last one sends all
+            group = f"{order_ref}:oca"
+            for child in children:  # when one fills, IB cancels the other
+                child.ocaGroup, child.ocaType = group, 1
+        parent_trade = self.broker.place(self.contract, parent, order_ref)
+        child_trades = []
+        try:
+            for child in children:
+                child.parentId = parent.orderId
+                child_trades.append(self.broker.place(self.contract, child, order_ref))
+        except BaseException:  # a half-sent bracket would sit untransmitted at IB: drop it
+            self.broker.cancel(parent)
+            raise
+        self.ib.sleep(1)  # give IB a moment to accept or reject
+
+        fill = self._finish(parent_trade, "BUY", shares)
         if fill is None:
-            log.warning("exec: entry of %d %s not filled, dropped", shares, self.contract.symbol)
-        elif fill.shares < shares:
-            log.warning("exec: entry partly filled, %d of %d; keeping %d", fill.shares, shares, fill.shares)
-        return fill
+            refused = [t for t in child_trades if t.orderStatus.status == "Inactive"]
+            self._cancel_all(child_trades)  # IB cancels children with their parent; make sure
+            if refused:  # a refused stop is not a slow market: say so instead of dropping the entry quietly
+                raise ExecutionHalt(f"IB refused the stop/target of {order_ref}, so the entry never went live: "
+                                    f"{[t.order.orderId for t in refused]}")
+            log.warning("exec: entry %s of %d %s not filled, dropped", order_ref, shares, self.contract.symbol)
+            return None
+        if fill.shares < shares:
+            log.warning("exec: entry partly filled, %d of %d; sizing the stop/target to %d", fill.shares, shares, fill.shares)
+
+        usable = [t for t in child_trades if not t.isDone() or t.orderStatus.status == "Filled"]
+        if len(usable) < len(child_trades):  # IB refused a leg: keep nothing half-built, the caller re-protects
+            log.error("exec: IB did not keep the stop/target of %s: %s", order_ref,
+                      [(t.order.orderId, t.orderStatus.status) for t in child_trades if t not in usable])
+            self._cancel_all(child_trades)
+            return Entered(fill, None, None)
+        for t in usable:
+            if not t.isDone() and int(t.order.totalQuantity) != fill.shares:
+                t.order.totalQuantity = fill.shares  # same orderId: IB treats it as a modify
+                t.order.transmit = True
+                self.broker.place(self.contract, t.order, order_ref)
+        return Entered(fill, child_trades[0].order.orderId, child_trades[1].order.orderId if has_target else None)
+
+    def _cancel_all(self, trades) -> None:
+        """Cancel every order still live and wait for IB to confirm; an unconfirmed cancel halts."""
+        for t in trades:
+            if not t.isDone():
+                self.broker.cancel(t.order)
+                self._wait(t, CANCEL_WAIT_S)
+                if not t.isDone():
+                    raise ExecutionHalt(f"order {t.order.orderId} is not confirmed cancelled after "
+                                        f"{CANCEL_WAIT_S}s; check IB before trading")
 
     # -- protection ----------------------------------------------------------------------
 
@@ -155,7 +253,7 @@ class Executor:
         The order ids stay on `pos` so the runner can still look up what filled; `protect` overwrites them.
         """
         ids = {pos.stop_order_id, pos.target_order_id} - {None}
-        ours = [t for t in self.ib.trades() if t.order.orderRef == self.broker.tag and t.order.orderId in ids]
+        ours = [t for t in self.ib.trades() if owns(self.broker.tag, t.order.orderRef) and t.order.orderId in ids]
         for t in ours:
             if not t.isDone():
                 self.broker.cancel(t.order)

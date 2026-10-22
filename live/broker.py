@@ -9,6 +9,7 @@ import logging
 from ib_async import IB
 
 from .config import CLIENT_ID, HOST, PAPER_PORTS, PORT
+from .refs import owns
 
 log = logging.getLogger("live")
 
@@ -54,16 +55,23 @@ class Broker:
         self.tag = tag  # orderRef put on every order, so reconcile can tell ours from anyone else's
         self.dry_run = dry_run
         self._host, self._port = host, port
+        self.sent = 0  # orders this process sent to IB (a modify counts too); the proof prints it
 
-    def place(self, contract, order):
-        """Check paper-ness, tag the order and send it. In dry-run mode log it and return None."""
+    def place(self, contract, order, ref: str | None = None):
+        """Check paper-ness, tag the order and send it. In dry-run mode log it and return None.
+
+        `ref` (an entry's idempotent orderRef) must start with the tag; without it the order carries the plain tag.
+        """
         if not self.ib.isConnected():
             raise PaperGuardError("Not connected")
         check_paper(self.ib, self._host, self._port)
-        order.orderRef = self.tag
+        if ref is not None and not owns(self.tag, ref):
+            raise ValueError(f"orderRef {ref!r} does not belong to {self.tag!r}")
+        order.orderRef = ref or order.orderRef or self.tag
         if self.dry_run:
             log.info("DRY RUN: would place %s %s %s", order.action, order.totalQuantity, contract.symbol)
             return None
+        self.sent += 1
         return self.ib.placeOrder(contract, order)
 
     def cancel(self, order):

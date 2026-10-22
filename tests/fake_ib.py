@@ -38,6 +38,7 @@ class FakeIB:
         self.freeze = False  # True: no order ever fills (timeout tests)
         self.now = None  # time stamped on fills
         self.errorEvent = Event()
+        self._forgotten = set()  # trades a restarted session does not know (see restart)
 
     def connect(self, host, port, clientId=0, **kwargs):
         self.connected = True
@@ -66,7 +67,7 @@ class FakeIB:
         return self.openTrades()
 
     def trades(self):
-        return list(self._trades)
+        return [t for t in self._trades if id(t) not in self._forgotten]
 
     def openTrades(self):
         return [t for t in self._trades if not t.isDone()]
@@ -79,6 +80,14 @@ class FakeIB:
         return list(contracts)
 
     def placeOrder(self, contract, order):
+        """Like IB: the same orderId again is a modify; transmit=False holds an order until a transmit=True one
+        of its bracket arrives; a child (parentId set) sleeps until its parent has filled."""
+        known = getattr(order, "orderId", 0) and next((t for t in self._trades if t.order.orderId == order.orderId), None)
+        if known:
+            known.order = order
+            known.orderStatus.remaining = order.totalQuantity - known.orderStatus.filled
+            self.placed.append((contract, order))
+            return known
         if not getattr(order, "orderId", 0):
             order.orderId = self.next_order_id
         self.next_order_id = max(self.next_order_id, order.orderId) + 1
@@ -88,7 +97,20 @@ class FakeIB:
         if getattr(order, "orderType", "") in self.reject_types:
             trade.orderStatus.status = "Inactive"
             return trade
-        self._try_fill(trade)
+        if not getattr(order, "transmit", True):
+            trade.orderStatus.status = "PendingSubmit"
+            return trade
+        parent_id = getattr(order, "parentId", 0) or order.orderId
+        for t in self._trades:  # a transmit releases its whole bracket
+            if t.orderStatus.status == "PendingSubmit" and parent_id in (t.order.orderId, getattr(t.order, "parentId", 0)):
+                t.orderStatus.status = "PreSubmitted" if getattr(t.order, "parentId", 0) else "Submitted"
+        if getattr(order, "parentId", 0):
+            trade.orderStatus.status = "PreSubmitted"
+        parent = next((t for t in self._trades if t.order.orderId == parent_id), trade)
+        if parent.orderStatus.status == "Submitted" and parent.orderStatus.filled == 0:
+            self._try_fill(parent)
+        elif not getattr(order, "parentId", 0):
+            self._try_fill(trade)
         return trade
 
     def _try_fill(self, trade):
@@ -111,7 +133,12 @@ class FakeIB:
         sign = 1 if order.action == "BUY" else -1
         symbol = trade.contract.symbol
         self.holdings[symbol] = self.holdings.get(symbol, 0) + sign * shares
-        trade.fills.append(SimpleNamespace(execution=SimpleNamespace(time=self.now, shares=shares, price=price)))
+        trade.fills.append(SimpleNamespace(execution=SimpleNamespace(
+            time=self.now, shares=shares, price=price, orderRef=getattr(order, "orderRef", ""), orderId=order.orderId,
+            side="BOT" if order.action == "BUY" else "SLD")))
+        for child in self._trades:  # a bracket's children wake up when their parent has a fill
+            if getattr(child.order, "parentId", 0) == order.orderId and child.orderStatus.status == "PreSubmitted":
+                child.orderStatus.status = "Submitted"
         if st.status == "Filled" and getattr(order, "ocaGroup", ""):  # one-cancels-other
             for other in self._trades:
                 if other is not trade and getattr(other.order, "ocaGroup", "") == order.ocaGroup and not other.isDone():
@@ -126,3 +153,16 @@ class FakeIB:
         for t in self._trades:
             if t.order is order or t.order.orderId == order.orderId:
                 t.orderStatus.status = "PendingCancel" if self.slow_cancel else "Cancelled"
+                if not self.slow_cancel and not t.orderStatus.filled:  # IB drops the children of an unfilled parent
+                    for child in self._trades:
+                        if getattr(child.order, "parentId", 0) == t.order.orderId and not child.isDone():
+                            child.orderStatus.status = "Cancelled"
+
+    def reqExecutions(self, execFilter=None):
+        """Today's executions, as ib_async's Fill objects: .execution has orderRef, side, shares, price, orderId."""
+        return [f for t in self._trades for f in t.fills]
+
+    def restart(self):
+        """The runner died and a new process connected: IB still has the open orders, the fills and the position,
+        but the new session's `trades()` no longer lists orders that were already done."""
+        self._forgotten = {id(t) for t in self._trades if t.isDone()}
