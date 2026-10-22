@@ -80,7 +80,7 @@ class Runner:
         self.ib.qualifyContracts(self.contract)
         accounts = check_paper(self.ib)
         say(f"account   : {', '.join(accounts)}  paper account (every account starts with DU), "
-            f"{HOST}:{PORT}, client ID {CLIENT_ID}")
+            f"{HOST}:{self.port}, client ID {CLIENT_ID}")
         say(f"run       : {self.name} on {self.symbol}" + ("  [DRY RUN: no orders will be sent]" if self.dry_run else ""))
         existed = self.state_path.exists()
         self.state = load(self.state_path, self.name, self.symbol, self.key)
@@ -206,6 +206,7 @@ class Runner:
         self.ib.qualifyContracts(self.contract)
         res = reconcile(self.ib, self.broker, self.state)
         self._report(res)
+        log.info("connection to IB restored; reconcile %s", "OK" if res.ok else "found problems")
         if res.problems:
             self._halt("reconcile after reconnect: " + "; ".join(res.problems))
             return
