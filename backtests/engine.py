@@ -12,8 +12,9 @@ strategy is written once and also works in the live paper trader. Rules:
   treated as the mid price; slippage (getting a slightly worse price than quoted)
   on market-type fills only (entry, stop, signal or time exit). A target is a
   limit order, so it pays spread but no slippage.
-- Size: shares are chosen so a stop-out loses `risk_pct` of equity, costs included, but
-  never more than `max_position_pct` of equity (no leverage). When a stop is tight the cap
+- Size: a `Sizer` (backtests/sizing.py) picks the shares. The default, fixed fractional, makes a
+  stop-out lose `risk_pct` of equity, costs included. Whatever the sizer says, a position never
+  costs more than `max_position_pct` of equity (no leverage). When a stop is tight the cap
   binds, the position is smaller than that, and a stop-out loses less than `risk_pct`.
 - R: a trade's `r_multiple` is net P&L over a FIXED `risk_pct` of equity at entry (so 1R is
   always 1% of the account, even when the cap held the real risk lower). `stop_risk` is the
@@ -32,10 +33,10 @@ import pandas as pd
 
 import indicators
 from backtests.vectorized import CACHE, COMMISSION, SPREAD, load_bars
+from backtests.sizing import RISK_PCT, FixedFractional, Sizer
 from strategies.base import Entry, Exit, Position, Strategy, check_bracket
 
 STARTING_EQUITY = 100_000.0
-RISK_PCT = 0.01  # lose 1% of equity if the stop is hit (project default)
 SLIPPAGE = 0.01  # dollars per share, first guess for liquid SPY
 
 
@@ -75,8 +76,12 @@ def run_backtest(
     costs: CostModel = CostModel(),
     max_position_pct: float = 1.0,
     lookback_bars: int | None = 200,
+    sizer: Sizer | None = None,
 ) -> BacktestResult:
     """Replay `bars` through `strategy`, one closed bar at a time.
+
+    `sizer` picks the share count (backtests/sizing.py); the default is `FixedFractional(risk_pct)`.
+    `risk_pct` also stays the fixed yardstick for `r_multiple`, whichever sizer is used.
 
     `lookback_bars` limits how many closed bars the strategy is shown (None = all
     of them). It must cover at least one session so session-reset indicators such
@@ -86,6 +91,8 @@ def run_backtest(
         raise ValueError("lookback_bars must cover at least one 78-bar session")
     if hasattr(strategy, "reset"):
         strategy.reset()
+    sizer = sizer or FixedFractional(risk_pct)
+    sizer.prepare(bars)
 
     n = len(bars)
     idx = bars.index
@@ -142,7 +149,8 @@ def run_backtest(
             risk_ps = (fill - pending.stop + 2 * costs.commission_per_share
                        + costs.spread / 2 + costs.slippage_per_share)
             if pending.stop < fill and risk_ps > 0:
-                qty = math.floor(cash * risk_pct / risk_ps)
+                qty = sizer.shares(equity=cash, fill=fill, risk_per_share=risk_ps,
+                                   entry_time=idx[i], trades=trades)
                 qty = min(qty, math.floor(cash * max_position_pct / fill))
                 if qty > 0:
                     shares, entry_raw, stop_risk = qty, open_[i], qty * risk_ps
