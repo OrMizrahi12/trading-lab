@@ -21,23 +21,29 @@ rules:
   #    normal, a collapse means the tuning was fitting noise.
   min_walk_forward_sharpe: 0.5
 
-  # 4. Monte Carlo drawdown. Reshuffle the real trades 5,000 times; the 5th-percentile max drawdown
+  # 4. The settings we would actually trade, on the same walk-forward months with no re-tuning.
+  #    Rule 3 judges the strategy plus its tuning procedure; this one judges the numbers we hand the
+  #    judge. Same 0.5 bar and same reason. The settings were still chosen with the full data in
+  #    view, so this is a weaker test than rule 3.
+  min_fixed_settings_sharpe: 0.5
+
+  # 5. Monte Carlo drawdown. Reshuffle the real trades 5,000 times; the 5th-percentile max drawdown
   #    is the bad-luck case (1 reshuffle in 20 is worse). It may not be worse than 20% of the
   #    account: with 1% risk a trade, a 20% hole is a long losing streak, and the point where most
   #    people would stop trading the plan. Stored as a negative fraction.
   max_drawdown_p5: -0.20
 
-  # 5. Break-even cost multiple: how many times the usual costs the strategy can pay before net profit
+  # 6. Break-even cost multiple: how many times the usual costs the strategy can pay before net profit
   #    hits zero. 2x means a wider spread, worse fills or a pricier broker cannot kill it. Real
   #    costs are the one thing a backtest guesses at, so we ask for room.
   min_break_even_multiple: 2.0
 
-  # 6. Deflated Sharpe Ratio: the probability the true Sharpe is above zero after allowing for how
+  # 7. Deflated Sharpe Ratio: the probability the true Sharpe is above zero after allowing for how
   #    many settings were tried (the luckiest of N tries looks good by chance), the short data and
   #    the shape of the returns. 0.95 is the usual 5% significance level.
   min_deflated_sharpe: 0.95
 
-  # 7. Parameter noise: nudge every setting a little at random and rerun. If the strategy only
+  # 8. Parameter noise: nudge every setting a little at random and rerun. If the strategy only
   #    works at the exact chosen numbers it is a peak, not a plateau. At least 80% of the nudged
   #    versions must still make money after costs.
   min_noise_profitable_share: 0.80

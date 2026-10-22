@@ -4,9 +4,10 @@
     uv run -m judge.scorecard donchian_breakout --symbol SPY
     uv run -m judge.scorecard bollinger_rsi_reversion --symbol QQQ --trials 250
 
-Seven rules, thresholds in judge/standards.yaml (with the reasoning for each):
-1. trade count, 2. Sharpe after costs, 3. walk-forward out-of-sample Sharpe, 4. Monte Carlo drawdown
-at the 5th percentile, 5. break-even cost multiple, 6. Deflated Sharpe Ratio, 7. parameter noise.
+Eight rules, thresholds in judge/standards.yaml (with the reasoning for each):
+1. trade count, 2. Sharpe after costs, 3. walk-forward out-of-sample Sharpe (re-tuned each window),
+4. the fixed settings' Sharpe on the same months, 5. Monte Carlo drawdown at the 5th percentile,
+6. break-even cost multiple, 7. Deflated Sharpe Ratio, 8. parameter noise.
 The tests are the ones from backtests/walk_forward.py, reports/orb_stress_test.py, reports/orb_noise_regimes.py
 and reports/luck_vs_skill.py, made strategy-agnostic and cut down so one run takes a couple of minutes:
 every backtest (main run, cost sweep, noise versions, walk-forward tuning) goes into one process pool.
@@ -261,7 +262,10 @@ def scorecard(name: str, symbol: str, settings: dict, standards: dict | None = N
         Rule("Walk-forward Sharpe", f"{oos['sharpe']:.2f}", f">= {rules_cfg['min_walk_forward_sharpe']}",
              oos["sharpe"] >= rules_cfg["min_walk_forward_sharpe"],
              f"{oos['windows_won']} of {oos['windows']} traded windows made money, tuning Sharpe averaged "
-             f"{oos['tune_sharpe']:.2f}; your fixed settings on the same months: Sharpe {oos_fixed['sharpe']:.2f}" + (f", {oos['fallbacks']} window(s) found no valid tuning" if oos["fallbacks"] else "")),
+             f"{oos['tune_sharpe']:.2f}" + (f", {oos['fallbacks']} window(s) found no valid tuning" if oos["fallbacks"] else "")),
+        Rule("Fixed-settings walk-forward", f"{oos_fixed['sharpe']:.2f}", f">= {rules_cfg['min_fixed_settings_sharpe']}",
+             oos_fixed["sharpe"] >= rules_cfg["min_fixed_settings_sharpe"],
+             f"{oos_fixed['windows_won']} of {oos_fixed['windows']} traded windows made money, no re-tuning"),
         Rule("Monte Carlo drawdown, P5", f"{dd_p5:.1%}", f">= {rules_cfg['max_drawdown_p5']:.0%}",
              dd_p5 >= rules_cfg["max_drawdown_p5"], f"real max drawdown {m['max_drawdown']:.1%}"),
         Rule("Break-even cost multiple", be_text, f">= {rules_cfg['min_break_even_multiple']}x",

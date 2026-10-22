@@ -4,7 +4,7 @@ import numpy as np
 
 from judge.scorecard import STRATEGIES, break_even, deflated_sharpe, load_standards, noise_versions
 
-RULE_KEYS = {"min_trades", "min_sharpe", "min_walk_forward_sharpe", "max_drawdown_p5",
+RULE_KEYS = {"min_trades", "min_sharpe", "min_walk_forward_sharpe", "min_fixed_settings_sharpe", "max_drawdown_p5",
              "min_break_even_multiple", "min_deflated_sharpe", "min_noise_profitable_share"}
 
 
