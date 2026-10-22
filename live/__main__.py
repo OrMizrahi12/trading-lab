@@ -9,7 +9,7 @@ import logging
 import sys
 
 from .broker import connect_paper, reconnect_paper
-from .config import PAPER_PORTS, PORT, STATE_DIR
+from .config import FLATTEN_BEFORE_CLOSE_MIN, PAPER_PORTS, PORT, STATE_DIR
 from .kill import main_precheck
 from .registry import STRATEGIES, parse_settings
 from .risk import Risk
@@ -50,6 +50,8 @@ def main() -> None:
                     help="resume after a halt: only once you have checked IB and the reconcile result is clean")
     ap.add_argument("--flatten-on-mismatch", action="store_true",
                     help="on start, sell shares IB holds that the state file cannot explain (default: halt)")
+    ap.add_argument("--flatten-before-close-min", type=int, default=FLATTEN_BEFORE_CLOSE_MIN, metavar="N",
+                    help=f"sell any position N minutes before the real close (default {FLATTEN_BEFORE_CLOSE_MIN})")
     args = ap.parse_args()
     if args.catch_up and not args.dry_run:
         ap.error("--catch-up is for --dry-run only: a real run never trades on history")
@@ -70,6 +72,7 @@ def main() -> None:
         ib = connect_paper(port=args.port)  # refuses a non-paper port, a remote host or any account not starting with DU
         Runner(ib, args.strategy, args.symbol, settings, dry_run=args.dry_run, catch_up=args.catch_up,
                flatten_on_mismatch=args.flatten_on_mismatch, clear_halt=args.clear_halt, risk=risk, port=args.port,
+               flatten_before_close_min=args.flatten_before_close_min,
                reconnect=lambda: reconnect_paper(ib, port=args.port)).run(once=args.once)
     except KeyboardInterrupt:  # Ctrl+C while connecting; Runner.run handles it once running
         print("\nCtrl+C: stopped before the engine started. Nothing was traded.")

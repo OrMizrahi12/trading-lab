@@ -1,0 +1,6 @@
+# What the scheduler runs each trading day (ONE strategy on ONE symbol, like `uv run -m live`).
+# The times are not here: they come from the NYSE calendar (see scheduler/plan.py).
+strategy: opening_range_breakout
+symbol: QQQ
+settings: {range_minutes: 15}   # passed as --set name=value
+max_restarts: 3                 # restarts of a runner that died before the flatten time (never after a halt or STOP)
