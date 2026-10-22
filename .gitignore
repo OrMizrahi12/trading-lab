@@ -26,6 +26,7 @@ venv/
 data/cache/
 # Last six months of QQQ and SPY bars, locked away from research (.claude/hooks/judge_guard.py)
 data/holdout/
+data/oos/
 reports/*.html
 
 # Research batch logs and done markers (scripts/research_batch.sh)
