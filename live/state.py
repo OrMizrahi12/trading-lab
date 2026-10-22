@@ -41,6 +41,11 @@ class PositionState:
     bars_held: int = 0
     stop_order_id: int | None = None
     target_order_id: int | None = None
+    # Set when IB closed the position (stop, target) before the delayed bars show it. The runner drops the
+    # position when it steps the first bar that contains this time, which is what the backtester does.
+    closed_at: str | None = None
+    exit_price: float | None = None
+    exit_reason: str | None = None
 
     def to_position(self) -> Position:
         return Position(

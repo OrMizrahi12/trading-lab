@@ -26,7 +26,7 @@ class FakeIB:
         self.market_data_type = None
         self.placed = []  # (contract, order) for every placeOrder
         self.cancelled = []
-        self.trades = []  # every FakeTrade ever placed (or put there by a test)
+        self._trades = []  # every FakeTrade ever placed (or put there by a test)
         self.holdings = {}  # symbol -> shares
         self.net_liquidation = 100_000.0
         self.next_order_id = 1
@@ -63,8 +63,11 @@ class FakeIB:
     def reqAllOpenOrders(self):
         return self.openTrades()
 
+    def trades(self):
+        return list(self._trades)
+
     def openTrades(self):
-        return [t for t in self.trades if not t.isDone()]
+        return [t for t in self._trades if not t.isDone()]
 
     def accountSummary(self, account=""):
         return [SimpleNamespace(tag="NetLiquidation", value=str(self.net_liquidation), currency="USD")]
@@ -78,7 +81,7 @@ class FakeIB:
         self.next_order_id = max(self.next_order_id, order.orderId) + 1
         self.placed.append((contract, order))
         trade = FakeTrade(contract, order)
-        self.trades.append(trade)
+        self._trades.append(trade)
         self._try_fill(trade)
         return trade
 
@@ -104,7 +107,7 @@ class FakeIB:
         self.holdings[symbol] = self.holdings.get(symbol, 0) + sign * shares
         trade.fills.append(SimpleNamespace(execution=SimpleNamespace(time=self.now, shares=shares, price=price)))
         if st.status == "Filled" and getattr(order, "ocaGroup", ""):  # one-cancels-other
-            for other in self.trades:
+            for other in self._trades:
                 if other is not trade and getattr(other.order, "ocaGroup", "") == order.ocaGroup and not other.isDone():
                     other.orderStatus.status = "Cancelled"
 
@@ -114,6 +117,6 @@ class FakeIB:
 
     def cancelOrder(self, order):
         self.cancelled.append(order)
-        for t in self.trades:
+        for t in self._trades:
             if t.order is order or t.order.orderId == order.orderId:
                 t.orderStatus.status = "Cancelled"

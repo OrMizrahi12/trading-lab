@@ -100,7 +100,7 @@ def test_hitting_the_stop_cancels_the_target():
     ib.holdings["QQQ"] = 10
     pos = position(target=105.0)
     ex.protect(pos)
-    stop_trade = ib.trades[0]
+    stop_trade = ib._trades[0]
     ib.trigger(stop_trade, 99.0)
     assert ib.holdings["QQQ"] == 0 and ib.openTrades() == []
 

@@ -17,7 +17,7 @@ def make(shares_state=None, shares_ib=0, orders=(), target=None):
     ib.holdings["QQQ"] = shares_ib
     for oid, ref, action in orders:
         order = SimpleNamespace(orderId=oid, orderRef=ref, action=action, totalQuantity=10)
-        ib.trades.append(FakeTrade(QQQ, order))
+        ib._trades.append(FakeTrade(QQQ, order))
     pos = None
     if shares_state:
         pos = PositionState(shares=shares_state, entry_time="2026-03-02T15:00:00+00:00", entry_price=100.0,
