@@ -17,9 +17,15 @@ if PORT not in PAPER_PORTS:
     raise RuntimeError(f"Refusing to connect: port {PORT} is not a paper port")
 
 
-def connect():
+TWS_PORT = 7497  # TWS paper port (the Gateway paper port is 4002)
+TWS_CLIENT_ID = 5
+
+
+def connect(port=PORT, client_id=CLIENT_ID):
+    if port not in PAPER_PORTS:
+        raise RuntimeError(f"Refusing to connect: port {port} is not a paper port")
     ib = IB()
-    ib.connect(HOST, PORT, clientId=CLIENT_ID)
+    ib.connect(HOST, port, clientId=client_id)
     accounts = ib.managedAccounts()
     if not accounts or not all(a.startswith("DU") for a in accounts):
         ib.disconnect()
@@ -156,7 +162,52 @@ def followup(ib):
     show_state(ib)
 
 
+def tws_demo(ib):
+    """TWS paper walk-through: what-if, a resting limit buy that we cancel, then a marketable limit round trip."""
+    spy = Stock("SPY", "SMART", "USD")
+    ib.qualifyContracts(spy)
+    price = market_price(ib, spy)
+
+    print("\n1) What-if market buy (places nothing)")
+    s = ib.whatIfOrder(spy, MarketOrder("BUY", QTY, tif="DAY"))
+    if isinstance(s, list) or s is None:
+        raise RuntimeError(f"what-if returned no order state: {s!r}")
+    print(f"  initial margin change={s.initMarginChange} maintenance margin change={s.maintMarginChange} "
+          f"equity with loan after={s.equityWithLoanAfter}")
+    print(f"  commission={s.commission} (min {s.minCommission}, max {s.maxCommission}) {s.commissionCurrency}")
+
+    print("\n2) Limit buy 0.50 below market, then cancel")
+    limit = round(price - 0.50, 2)
+    t = ib.placeOrder(spy, LimitOrder("BUY", QTY, limit, tif="DAY"))
+    ib.sleep(3)
+    print(f"  limit {limit} status={t.orderStatus.status}; cancelling")
+    ib.cancelOrder(t.order)
+    print(f"  done={wait_done(ib, t)} status={t.orderStatus.status}")
+
+    print("\n3) Marketable limit buy 0.50 above market (fills at once if the market is open)")
+    buy = ib.placeOrder(spy, LimitOrder("BUY", QTY, round(price + 0.50, 2), tif="DAY"))
+    print(f"  done={wait_done(ib, buy)} status={buy.orderStatus.status} filled={buy.orderStatus.filled}")
+    if buy.orderStatus.filled < QTY:
+        print("  not filled: cancelling it and NOT selling, since nothing was bought")
+        ib.cancelOrder(buy.order)
+        print(f"  done={wait_done(ib, buy)} status={buy.orderStatus.status}")
+        return
+
+    print("\n4) Matching marketable limit sell 0.50 below market to close")
+    sell = ib.placeOrder(spy, LimitOrder("SELL", buy.orderStatus.filled, round(price - 0.50, 2), tif="DAY"))
+    print(f"  done={wait_done(ib, sell)} status={sell.orderStatus.status} filled={sell.orderStatus.filled}")
+    show_state(ib)
+
+
 def main(stage="orders"):
+    if stage == "tws":
+        ib = connect(TWS_PORT, TWS_CLIENT_ID)
+        hook_events(ib)
+        ib.errorEvent += lambda reqId, code, msg, contract: print(f"  [ib message] {code}: {msg}")
+        try:
+            return tws_demo(ib)
+        finally:
+            ib.disconnect()
     ib = connect()
     hook_events(ib)
     try:
