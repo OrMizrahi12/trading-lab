@@ -10,6 +10,15 @@
             "command": "python3 \"$CLAUDE_PROJECT_DIR\"/.claude/hooks/block_live_ports.py"
           }
         ]
+      },
+      {
+        "matcher": "Bash|Edit|Write|NotebookEdit|Read|Grep|Glob",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 \"$CLAUDE_PROJECT_DIR\"/.claude/hooks/judge_guard.py"
+          }
+        ]
       }
     ],
     "Stop": [
@@ -32,7 +41,13 @@
       "Read(./.env)",
       "Edit(./.env)",
       "Bash(git push --force:*)",
-      "Bash(git push -f:*)"
+      "Bash(git push -f:*)",
+      "Edit(./judge/**)",
+      "Edit(./.claude/settings.json)",
+      "Edit(./.claude/settings.local.json)",
+      "Edit(./.claude/hooks/judge_guard.py)",
+      "Edit(./data/holdout/**)",
+      "Read(./data/holdout/**)"
     ],
     "ask": [
       "Bash(rm:*)"
