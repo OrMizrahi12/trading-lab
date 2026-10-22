@@ -24,8 +24,8 @@ from strategies.base import Entry, Exit
 from strategies.session_clock import SessionClock
 
 from .broker import Broker, PaperGuardError, check_paper
-from .config import (CLIENT_ID, FLATTEN_BEFORE_CLOSE_MIN, HOLE_WAIT_MIN, HOST, LOOKBACK_BARS,
-                     MAX_SIGNAL_AGE_MIN, MAX_TICK_ERRORS, POLL_SECONDS, PORT, STATE_DIR)
+from .config import (CLIENT_ID, FLATTEN_BEFORE_CLOSE_MIN, HOLE_WAIT_MIN, HOST, LOOKBACK_BARS, MAX_SIGNAL_AGE_MIN,
+                     MAX_TICK_ERRORS, POLL_SECONDS, PORT, RECONNECT_ATTEMPTS, RECONNECT_WAIT_S, STATE_DIR)
 from .console import bar_line, position_text, say
 from .execution import DuplicateEntry, ExecutionHalt, Executor, utc_now
 from .feed import BAR, NY, BarFeed
@@ -45,11 +45,12 @@ class Runner:
                  wall_clock_rules: bool = True, catch_up: int = 0, flatten_on_mismatch: bool = False,
                  clear_halt: bool = False, hole_wait_min: int = HOLE_WAIT_MIN,
                  max_signal_age_min: int = MAX_SIGNAL_AGE_MIN, flatten_before_close_min: int = FLATTEN_BEFORE_CLOSE_MIN,
-                 lookback: int = LOOKBACK_BARS, contract=None, risk: Risk | None = None):
+                 lookback: int = LOOKBACK_BARS, contract=None, risk: Risk | None = None, reconnect=None,
+                 reconnect_attempts: int = RECONNECT_ATTEMPTS, reconnect_wait_s: float = RECONNECT_WAIT_S, port: int = PORT):
         self.ib, self.name, self.symbol, self.dry_run, self.clock = ib, name, symbol, dry_run, clock
         self.contract = contract or Stock(symbol, "SMART", "USD")
         self.tag = f"live:{name}:{symbol}"
-        self.broker = Broker(ib, self.tag, dry_run=dry_run, risk=risk)
+        self.broker = Broker(ib, self.tag, dry_run=dry_run, risk=risk, port=port)
         self.dir = run_dir(name, symbol, root)
         self.state_path = self.dir / ("state_dryrun.json" if dry_run else "state.json")
         self.key = settings_key(name, symbol, settings)
@@ -67,6 +68,7 @@ class Runner:
         self.sessions = SessionClock()
         self.state: LiveState | None = None
         self.stop_file = stop_path(root)
+        self.reconnect, self.reconnect_attempts, self.reconnect_wait_s, self.port = reconnect, reconnect_attempts, reconnect_wait_s, port
         self.stopped = False  # the STOP file was seen: nothing more is done until it is removed
 
     # -- start ---------------------------------------------------------------------------
@@ -90,12 +92,7 @@ class Runner:
         res = reconcile(self.ib, self.broker, self.state)
         if res.problems and self.flatten_on_mismatch and not self.dry_run:
             res = self._flatten_mismatch(res)
-        say(f"reconcile : state says {res.state_text} | IB says {res.ib_text}")
-        for line in res.actions:
-            say(f"            did: {line}")
-        for line in res.problems:
-            say(f"            PROBLEM: {line}")
-        say("            -> " + ("OK" if res.ok else "NOT OK, halting: nothing will be traded"))
+        self._report(res)
         if res.problems:
             self._halt("reconcile: " + "; ".join(res.problems))
             return
@@ -116,6 +113,14 @@ class Runner:
             self._halt(str(e))
             return
         self._save()
+
+    def _report(self, res) -> None:
+        say(f"reconcile : state says {res.state_text} | IB says {res.ib_text}")
+        for line in res.actions:
+            say(f"            did: {line}")
+        for line in res.problems:
+            say(f"            PROBLEM: {line}")
+        say("            -> " + ("OK" if res.ok else "NOT OK, halting: nothing will be traded"))
 
     @staticmethod
     def _et(iso: str | None) -> str:
@@ -171,11 +176,56 @@ class Runner:
             self._save()
         return True
 
+    def _ensure_connected(self) -> None:
+        """The API connection dropped: get it back, then trust nothing from before the drop.
+
+        Bounded retries (`reconnect_attempts` every `reconnect_wait_s`), then the same reconcile as at start: the
+        state file against IB's positions and open orders. A problem there, a non-paper account on the new
+        connection, or no connection at all halts; a clean result carries on. Orders resting at IB (the stop and
+        target are GTC) kept protecting the position while we were away. Without a `reconnect` callable this does nothing.
+        """
+        if self.reconnect is None or self.ib.isConnected():
+            return
+        log.error("connection to IB lost")
+        say("CONNECTION: lost. Reconnecting; nothing is traded until the state has been checked against IB again.")
+        for attempt in range(1, self.reconnect_attempts + 1):
+            try:
+                self.reconnect()
+                break
+            except PaperGuardError as e:
+                self._halt(f"paper guard on reconnect: {e}")
+                return
+            except Exception as e:
+                log.warning("reconnect attempt %d of %d failed: %s", attempt, self.reconnect_attempts, e)
+                say(f"CONNECTION: attempt {attempt} of {self.reconnect_attempts} failed ({type(e).__name__}: {e})")
+                self.ib.sleep(self.reconnect_wait_s)
+        else:
+            self._halt(f"connection to IB lost and {self.reconnect_attempts} reconnect attempts failed")
+            return
+        say("CONNECTION: back. Checking the state against IB.")
+        self.ib.qualifyContracts(self.contract)
+        res = reconcile(self.ib, self.broker, self.state)
+        self._report(res)
+        if res.problems:
+            self._halt("reconcile after reconnect: " + "; ".join(res.problems))
+            return
+        try:
+            if res.needs_protection:
+                say("            did: no stop/target found at IB for the open position, placing a new one")
+                self._protect_or_flatten(self.state.position, self._ref_price())
+        except ExecutionHalt as e:
+            self._halt(str(e))
+            return
+        self._save()
+
     def tick(self) -> None:
         if self._stop_seen():
             return
         if self.state.halted:
             log.error("halted, not trading: %s", self.state.halted)
+            return
+        self._ensure_connected()
+        if self.state.halted:
             return
         now = self.clock()
         try:

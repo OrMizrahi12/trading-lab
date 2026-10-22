@@ -127,10 +127,11 @@ def test_ctrl_c_during_start_is_also_clean(tmp_path, console):
     assert not (runner.dir / "runner.pid").exists() and "Ctrl+C" in console.text
 
 
-def test_ctrl_c_while_connecting_exits_130_with_a_message(monkeypatch, capsys):
+def test_ctrl_c_while_connecting_exits_130_with_a_message(monkeypatch, capsys, tmp_path):
     import live.__main__ as cli
 
-    monkeypatch.setattr(cli, "connect_paper", lambda: (_ for _ in ()).throw(KeyboardInterrupt))
+    monkeypatch.setattr(cli, "STATE_DIR", tmp_path)  # never the real data/live: a real STOP file there must not matter
+    monkeypatch.setattr(cli, "connect_paper", lambda **kw: (_ for _ in ()).throw(KeyboardInterrupt))
     monkeypatch.setattr(cli, "setup_logging", lambda directory: None)
     monkeypatch.setattr(sys, "argv", ["live", "--strategy", "ema_trend", "--symbol", "QQQ", "--dry-run"])
     with pytest.raises(SystemExit) as stopped:

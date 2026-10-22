@@ -8,8 +8,8 @@ import argparse
 import logging
 import sys
 
-from .broker import connect_paper
-from .config import STATE_DIR
+from .broker import connect_paper, reconnect_paper
+from .config import PAPER_PORTS, PORT, STATE_DIR
 from .kill import main_precheck
 from .registry import STRATEGIES, parse_settings
 from .risk import Risk
@@ -44,6 +44,8 @@ def main() -> None:
                     help="everything except sending orders; decisions are logged to signals.jsonl")
     ap.add_argument("--catch-up", type=int, default=0, metavar="N",
                     help="dry run only: on a fresh state, also step the last N closed bars to show their decisions")
+    ap.add_argument("--port", type=int, default=PORT, choices=sorted(PAPER_PORTS),
+                    help="paper ports only; use 7497 behind a relay to test a dropped connection (see AGENTS.md)")
     ap.add_argument("--clear-halt", action="store_true",
                     help="resume after a halt: only once you have checked IB and the reconcile result is clean")
     ap.add_argument("--flatten-on-mismatch", action="store_true",
@@ -65,9 +67,10 @@ def main() -> None:
     setup_logging(run_dir(args.strategy, args.symbol, STATE_DIR))
     ib = None
     try:
-        ib = connect_paper()  # refuses a non-paper port, a remote host or any account not starting with DU
+        ib = connect_paper(port=args.port)  # refuses a non-paper port, a remote host or any account not starting with DU
         Runner(ib, args.strategy, args.symbol, settings, dry_run=args.dry_run, catch_up=args.catch_up,
-               flatten_on_mismatch=args.flatten_on_mismatch, clear_halt=args.clear_halt, risk=risk).run(once=args.once)
+               flatten_on_mismatch=args.flatten_on_mismatch, clear_halt=args.clear_halt, risk=risk, port=args.port,
+               reconnect=lambda: reconnect_paper(ib, port=args.port)).run(once=args.once)
     except KeyboardInterrupt:  # Ctrl+C while connecting; Runner.run handles it once running
         print("\nCtrl+C: stopped before the engine started. Nothing was traded.")
         sys.exit(130)

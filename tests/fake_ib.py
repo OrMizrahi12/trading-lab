@@ -35,6 +35,8 @@ class FakeIB:
         self.fractions = []  # per-order fill shares for the next marketable orders (consumed first)
         self.slow_cancel = False  # True: a cancel is never confirmed (status stays PendingCancel)
         self.reject_types = set()  # order types IB rejects, e.g. {"STP"}
+        self.reject_code, self.reject_text = 201, "Order rejected - reason: the fake IB refuses this order type"
+        self.tick = 0.01  # prices must be a multiple of this, as IB demands (error 110 otherwise)
         self.freeze = False  # True: no order ever fills (timeout tests)
         self.now = None  # time stamped on fills
         self.errorEvent = Event()
@@ -95,8 +97,10 @@ class FakeIB:
         trade = FakeTrade(contract, order)
         self._trades.append(trade)
         if getattr(order, "orderType", "") in self.reject_types:
-            trade.orderStatus.status = "Inactive"
-            return trade
+            return self._reject(trade, self.reject_code, self.reject_text)
+        for price in (getattr(order, "lmtPrice", 0), getattr(order, "auxPrice", 0)):
+            if 0 < price < 1e9 and abs(round(price / self.tick) * self.tick - price) > 1e-9:  # 1e9+ is ib_async's "unset"
+                return self._reject(trade, 110, "The price does not conform to the minimum price variation for this contract.")
         if not getattr(order, "transmit", True):
             trade.orderStatus.status = "PendingSubmit"
             return trade
@@ -111,6 +115,11 @@ class FakeIB:
             self._try_fill(parent)
         elif not getattr(order, "parentId", 0):
             self._try_fill(trade)
+        return trade
+
+    def _reject(self, trade, code, text):
+        trade.orderStatus.status = "Inactive"
+        self.errorEvent.emit(trade.order.orderId, code, text, trade.contract)
         return trade
 
     def _try_fill(self, trade):

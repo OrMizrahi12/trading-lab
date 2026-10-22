@@ -35,6 +35,10 @@ class ExecutionHalt(RuntimeError):
     """An order could not be completed (a stuck exit). The runner stops trading and says so."""
 
 
+class OrderRejected(ExecutionHalt):
+    """IB refused an order (status Inactive). Logged with IB's code and reason; never retried."""
+
+
 @dataclass(frozen=True)
 class Fill:
     shares: int
@@ -130,6 +134,8 @@ class Executor:
                 raise ExecutionHalt(f"{action} order {order.orderId} is not confirmed cancelled after "
                                     f"{CANCEL_WAIT_S}s; check IB before trading")
         filled = int(trade.orderStatus.filled)
+        if filled == 0 and trade.orderStatus.status == "Inactive":  # refused, not slow: re-pricing would not help
+            raise OrderRejected(f"IB rejected {action} {shares} {self.contract.symbol}: {self.broker.rejection(trade)}")
         if filled == 0:
             return None
         return Fill(filled, float(trade.orderStatus.avgFillPrice), self.clock())
@@ -181,13 +187,17 @@ class Executor:
             raise
         self.ib.sleep(1)  # give IB a moment to accept or reject
 
-        fill = self._finish(parent_trade, "BUY", shares)
+        try:
+            fill = self._finish(parent_trade, "BUY", shares)
+        except OrderRejected:
+            self._cancel_all(child_trades)  # IB drops the children of a refused parent; make sure
+            raise
         if fill is None:
             refused = [t for t in child_trades if t.orderStatus.status == "Inactive"]
             self._cancel_all(child_trades)  # IB cancels children with their parent; make sure
             if refused:  # a refused stop is not a slow market: say so instead of dropping the entry quietly
-                raise ExecutionHalt(f"IB refused the stop/target of {order_ref}, so the entry never went live: "
-                                    f"{[t.order.orderId for t in refused]}")
+                raise OrderRejected(f"IB refused the stop/target of {order_ref}, so the entry never went live: "
+                                    + "; ".join(f"order {t.order.orderId} {self.broker.rejection(t)}" for t in refused))
             log.warning("exec: entry %s of %d %s not filled, dropped", order_ref, shares, self.contract.symbol)
             return None
         if fill.shares < shares:
@@ -279,7 +289,13 @@ class Executor:
         for attempt in range(self.max_reprices + 1):
             if left <= 0:
                 break
-            fill = self._send("SELL", left, ref, widen=attempt)
+            try:
+                fill = self._send("SELL", left, ref, widen=attempt)
+            except OrderRejected:  # we know this sell is not live, so the stop/target go back; no second attempt
+                pos.shares = left
+                if restore_protection:
+                    self.protect(pos)
+                raise
             if fill is not None:
                 sold, proceeds, left = sold + fill.shares, proceeds + fill.shares * fill.price, left - fill.shares
             if left > 0:

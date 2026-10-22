@@ -28,3 +28,6 @@ EXIT_MAX_REPRICES = 3  # a stuck exit is re-priced wider this many times, then t
 
 HOLE_WAIT_MIN = 60  # a missing bar is waited for this long after it should have closed, then stepped past (entries stay blocked)
 MAX_TICK_ERRORS = 5  # consecutive failed polls (feed errors, dropped connection) before the engine halts
+
+RECONNECT_ATTEMPTS = 6  # tries to get the API connection back before the engine halts
+RECONNECT_WAIT_S = 10  # between tries
