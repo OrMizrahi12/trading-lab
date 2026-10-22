@@ -225,3 +225,35 @@ def test_waiting_for_commissions_ends_even_if_they_never_come(journal):
     ib.placeOrder(Stock("QQQ"), LimitOrder("BUY", 2, 101.0))
     journal.sync(ib, full=True, commission_wait_s=2)
     assert rows(journal, "SELECT commission FROM fills") == [{"commission": None}]
+
+
+def test_a_finished_order_gets_its_quantity_and_average_price_from_its_fills(tmp_path, journal):
+    ib, runner, _ = run_entry(tmp_path, journal)
+    buy = next(t for t in ib.trades() if t.order.action == "BUY")
+    shares = runner.state.position.shares
+    ib.restart()
+    buy.order.permId = 555  # IB gives finished orders a permId; their executions carry it too
+    buy.fills[0].execution.permId = 555
+    buy.order.totalQuantity = 0  # what IB reports for a finished order
+    buy.orderStatus.avgFillPrice, buy.orderStatus.filled = 0.0, 0
+    fresh = Journal(tmp_path / "fresh.sqlite3", clock=lambda: at(f"{DAY1} 10:30"))
+    fresh.sync(ib, full=True, completed=True)
+    got = rows(fresh, "SELECT quantity, filled, avg_fill_price, status FROM orders WHERE perm_id = 555")
+    assert got == [{"quantity": shares, "filled": shares, "avg_fill_price": 100.0, "status": "Filled"}]
+    fresh.close()
+
+
+def test_a_cancelled_order_keeps_its_unknown_quantity_and_a_partial_fill_its_own_average(tmp_path, journal):
+    ib = FakeIB()
+    order = LimitOrder("BUY", 5, 100.0)
+    order.permId, order.orderRef = 777, "live:x:QQQ"
+    ib.freeze = True  # nothing fills by itself
+    trade = ib.placeOrder(Stock("QQQ"), order)
+    ib.now = at(f"{DAY1} 10:00")
+    ib._fill(trade, 3, 99.5)  # a partial fill, then cancelled
+    trade.orderStatus.status, trade.orderStatus.avgFillPrice, trade.orderStatus.filled = "Cancelled", 0.0, 0
+    trade.order.totalQuantity = 0  # IB reports finished orders without their size
+    trade.fills[0].execution.permId = 777
+    journal.sync(ib, full=True)
+    got = rows(journal, "SELECT quantity, filled, avg_fill_price FROM orders WHERE perm_id = 777")
+    assert got == [{"quantity": 0.0, "filled": 3.0, "avg_fill_price": 99.5}]  # quantity stays what IB said: unknown

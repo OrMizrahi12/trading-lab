@@ -6,7 +6,7 @@ import in `live/journal_import.py`, which uses this same class. Nothing in the s
 research code touches it. The file is `data/live/journal.sqlite3` (gitignored). It is a record, not a control: a failed
 write is logged and never stops trading.
 
-Tables: `signals` (what a strategy decided and what was done), `orders` (one row per IB order, keyed by IB's permId),
+Tables: `signals` (what a strategy decided and what was done), `orders` (one row per IB order, keyed by IB's permId; quantity, filled and average price come from the fills when IB omits them),
 `fills` (one row per execution, keyed by IB's execId; `commission` stays NULL until IB's report arrives), `snapshots`
 (one row per account per New York day: the first and the latest reading). View `entry_pnl`: profit and loss per entry ref.
 
@@ -231,6 +231,7 @@ class Journal:
                 if owns is None or owns(f.execution.orderRef or ""):
                     self._fill(f, now)
             self._attribute()
+            self._complete_orders()
         after = self._count()
         return {"orders_seen": len(trades), "fills_seen": len(fills),
                 "new_orders": after[0] - before[0], "new_fills": after[1] - before[1]}
@@ -307,6 +308,20 @@ class Journal:
                    ({latest_buy.format(same_tag="AND substr(b.order_ref, 1, length(fills.order_ref) + 1) = fills.order_ref || ':'")}),
                    ({latest_buy.format(same_tag="")}))
                WHERE entry_ref IS NULL AND side = 'SLD' AND order_ref LIKE 'live:%'""")
+
+    def _complete_orders(self) -> None:
+        """IB reports a finished order without its quantity or average price (both come back 0): take them from its fills.
+        Filled and average price come from the fills whenever an order has any; the quantity only for a fully filled order
+        (a cancelled order's original size is not in the fills)."""
+        by_order = "(SELECT {agg} FROM fills WHERE fills.perm_id = orders.perm_id)"
+        self.db.execute(
+            f"""UPDATE orders SET
+                    filled = {by_order.format(agg="SUM(shares)")},
+                    avg_fill_price = {by_order.format(agg="SUM(shares * price) / SUM(shares)")},
+                    quantity = CASE WHEN status = 'Filled' AND COALESCE(quantity, 0) = 0
+                                    THEN {by_order.format(agg="SUM(shares)")} ELSE quantity END
+                WHERE perm_id IS NOT NULL AND EXISTS (SELECT 1 FROM fills WHERE fills.perm_id = orders.perm_id)
+                  AND (COALESCE(avg_fill_price, 0) = 0 OR COALESCE(filled, 0) = 0 OR COALESCE(quantity, 0) = 0)""")
 
     # -- daily snapshot ------------------------------------------------------------------
 
