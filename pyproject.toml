@@ -8,6 +8,7 @@ dependencies = [
     "exchange-calendars>=4.13.2",
     "ib-async>=2.1.0",
     "ibapi",
+    "optuna>=5.0.0",
     "pandas>=3.0.6",
     "plotly>=7.1.0",
     "pyarrow>=26.0.0",
