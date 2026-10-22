@@ -12,6 +12,7 @@ class FakeTrade:
         self.contract = contract
         self.order = order
         self.orderStatus = SimpleNamespace(status="Submitted", filled=0, remaining=order.totalQuantity, avgFillPrice=0.0)
+        self.fills = []  # SimpleNamespace(execution=SimpleNamespace(time, shares, price))
 
     def isDone(self):
         return self.orderStatus.status in ("Filled", "Cancelled", "Inactive")
@@ -29,6 +30,11 @@ class FakeIB:
         self.holdings = {}  # symbol -> shares
         self.net_liquidation = 100_000.0
         self.next_order_id = 1
+        self.market_price = None  # a marketable limit fills at this price; None = nothing fills
+        self.fill_fraction = 1.0  # share of a marketable order that fills (partial fills)
+        self.fractions = []  # per-order fill shares for the next marketable orders (consumed first)
+        self.freeze = False  # True: no order ever fills (timeout tests)
+        self.now = None  # time stamped on fills
         self.errorEvent = Event()
 
     def connect(self, host, port, clientId=0, **kwargs):
@@ -73,7 +79,38 @@ class FakeIB:
         self.placed.append((contract, order))
         trade = FakeTrade(contract, order)
         self.trades.append(trade)
+        self._try_fill(trade)
         return trade
+
+    def _try_fill(self, trade):
+        order, px = trade.order, self.market_price
+        if self.freeze or px is None or order.orderType != "LMT":
+            return
+        crosses = order.lmtPrice >= px if order.action == "BUY" else order.lmtPrice <= px
+        if crosses and not getattr(order, "ocaGroup", ""):  # a resting target is filled by trigger()
+            fraction = self.fractions.pop(0) if self.fractions else self.fill_fraction
+            self._fill(trade, max(1, int(order.totalQuantity * fraction)), px)
+
+    def _fill(self, trade, shares, price):
+        order, st = trade.order, trade.orderStatus
+        shares = min(shares, st.remaining)
+        total = st.filled * st.avgFillPrice + shares * price
+        st.filled += shares
+        st.remaining -= shares
+        st.avgFillPrice = total / st.filled
+        st.status = "Filled" if st.remaining == 0 else "Submitted"
+        sign = 1 if order.action == "BUY" else -1
+        symbol = trade.contract.symbol
+        self.holdings[symbol] = self.holdings.get(symbol, 0) + sign * shares
+        trade.fills.append(SimpleNamespace(execution=SimpleNamespace(time=self.now, shares=shares, price=price)))
+        if st.status == "Filled" and getattr(order, "ocaGroup", ""):  # one-cancels-other
+            for other in self.trades:
+                if other is not trade and getattr(other.order, "ocaGroup", "") == order.ocaGroup and not other.isDone():
+                    other.orderStatus.status = "Cancelled"
+
+    def trigger(self, trade, price):
+        """A resting stop or target gets hit at `price`."""
+        self._fill(trade, trade.orderStatus.remaining, price)
 
     def cancelOrder(self, order):
         self.cancelled.append(order)
