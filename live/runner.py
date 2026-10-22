@@ -23,9 +23,10 @@ from ib_async import Stock
 from strategies.base import Entry, Exit
 from strategies.session_clock import SessionClock
 
-from .broker import Broker, PaperGuardError
-from .config import (FLATTEN_BEFORE_CLOSE_MIN, HOLE_WAIT_MIN, LOOKBACK_BARS, MAX_SIGNAL_AGE_MIN,
-                     MAX_TICK_ERRORS, POLL_SECONDS, STATE_DIR)
+from .broker import Broker, PaperGuardError, check_paper
+from .config import (CLIENT_ID, FLATTEN_BEFORE_CLOSE_MIN, HOLE_WAIT_MIN, HOST, LOOKBACK_BARS,
+                     MAX_SIGNAL_AGE_MIN, MAX_TICK_ERRORS, POLL_SECONDS, PORT, STATE_DIR)
+from .console import bar_line, position_text, say
 from .execution import ExecutionHalt, Executor, utc_now
 from .feed import BAR, NY, BarFeed
 from .reconcile import ib_shares, reconcile
@@ -69,12 +70,26 @@ class Runner:
     def start(self) -> None:
         """Load the state, compare it with IB, and refuse to trade if anything is unexplained."""
         self.ib.qualifyContracts(self.contract)
+        accounts = check_paper(self.ib)
+        say(f"account   : {', '.join(accounts)}  paper account (every account starts with DU), "
+            f"{HOST}:{PORT}, client ID {CLIENT_ID}")
+        say(f"run       : {self.name} on {self.symbol}" + ("  [DRY RUN: no orders will be sent]" if self.dry_run else ""))
+        existed = self.state_path.exists()
         self.state = load(self.state_path, self.name, self.symbol, self.key)
+        say(f"state     : {self.state_path}  "
+            + (f"loaded, last bar stepped {self._et(self.state.last_bar_ts)}" if existed and self.state.last_bar_ts
+               else "loaded" if existed else "none yet, starting fresh"))
         if hasattr(self.strategy, "reset"):
             self.strategy.reset()  # the backtester does this too
         res = reconcile(self.ib, self.broker, self.state)
         if res.problems and self.flatten_on_mismatch and not self.dry_run:
             res = self._flatten_mismatch(res)
+        say(f"reconcile : state says {res.state_text} | IB says {res.ib_text}")
+        for line in res.actions:
+            say(f"            did: {line}")
+        for line in res.problems:
+            say(f"            PROBLEM: {line}")
+        say("            -> " + ("OK" if res.ok else "NOT OK, halting: nothing will be traded"))
         if res.problems:
             self._halt("reconcile: " + "; ".join(res.problems))
             return
@@ -88,11 +103,17 @@ class Runner:
             self.state.halted = None
         try:
             if res.needs_protection:
+                say(f"            did: no stop/target found at IB for the open position, placing a new one "
+                    f"(stop {self.state.position.stop:.2f})")
                 self._protect_or_flatten(self.state.position, self._ref_price())
         except ExecutionHalt as e:
             self._halt(str(e))
             return
         self._save()
+
+    @staticmethod
+    def _et(iso: str | None) -> str:
+        return "-" if not iso else f"{pd.Timestamp(iso).tz_convert('America/New_York'):%Y-%m-%d %H:%M} ET"
 
     def _ref_price(self) -> float:
         if self._last_ref is None:
@@ -171,6 +192,7 @@ class Runner:
             self.state.last_bar_ts = anchor.isoformat()
             self._save()
             log.info("first run: starting after bar %s", anchor)
+            say(f"first run : starting after the bar of {self._et(anchor.isoformat())}; no trades on history")
         last = pd.Timestamp(self.state.last_bar_ts)
         wait_for = self._hole_to_wait_for(last, now)
         for ts in closed.index[closed.index > last]:
@@ -222,13 +244,19 @@ class Runner:
             st.position = None
         bars = window(closed, ts, self.lookback)
         intent = step(self.strategy, bars, st.position)
-        if intent is not None:
-            self._act(intent, ts, bars, now)
+        where, late = position_text(st.position), now - bar_close
+        try:
+            outcome = "no signal" if intent is None else self._act(intent, ts, bars, now)
+        except ExecutionHalt as e:
+            say(bar_line(ts, closed.loc[ts], late, where, f"HALT: {e}"))
+            raise
+        say(bar_line(ts, closed.loc[ts], late, where, outcome))
         if not st.halted:
             st.last_bar_ts = ts.isoformat()
             self._save()
 
-    def _act(self, intent: Entry | Exit, ts: pd.Timestamp, bars: pd.DataFrame, now: pd.Timestamp) -> None:
+    def _act(self, intent: Entry | Exit, ts: pd.Timestamp, bars: pd.DataFrame, now: pd.Timestamp) -> str:
+        """Act on a decision. Returns one line saying what was decided and what was done, for the console."""
         st, bar_close = self.state, ts + BAR
         ref = float(bars["close"].iloc[-1])
         record = {"bar": ts.isoformat(), "kind": type(intent).__name__.lower(), "reason": intent.reason,
@@ -242,34 +270,41 @@ class Runner:
                 record["action"] = f"skipped: {blocked or 'size 0 (stop not below the price)'}"
                 self._append("signals.jsonl", record)
                 log.info("signal %s entry skipped: %s", ts, record["action"])
-                return
+                return f"ENTRY signal ({intent.reason}, stop {intent.stop:.2f}) -> {record['action']}"
             fill = self.executor.buy(shares, ref)
             record["action"] = "bought" if fill else "not filled" if not self.dry_run else "dry run"
             self._append("signals.jsonl", record)
+            signal = f"ENTRY signal ({intent.reason}, stop {intent.stop:.2f}, target {record['target'] or 'none'})"
             if fill is None:
-                return
+                return f"{signal} -> {record['action']}" + ("" if self.dry_run else f", {shares} shares not filled in time")
             st.position = PositionState(shares=fill.shares, entry_time=bar_close.isoformat(), entry_price=fill.price,
                                         stop=intent.stop, target=record["target"])
             self._save()  # the position exists at IB now: write it down before anything else can fail
             if fill.price <= intent.stop:  # the backtester drops an entry whose fill is not above the stop; so do we
                 self._abort_entry(f"filled at {fill.price}, not above the stop {intent.stop}", ref, now)
-                return
+                return f"{signal} -> bought {fill.shares} @ {fill.price:.2f}, not above the stop: sold again"
             self._protect_or_flatten(st.position, ref, now)
             self._save()
-            return
+            if st.position is None:
+                return f"{signal} -> bought {fill.shares} @ {fill.price:.2f}, protection failed: sold again"
+            return f"{signal} -> bought {fill.shares} @ {fill.price:.2f}, stop and target resting at IB"
         # Exit: never skipped because it is old.
         pos = st.position
         fill = self.executor.exit(pos, ref)
         record["action"] = "sold" if fill else "dry run" if self.dry_run else "nothing left to sell"
         self._append("signals.jsonl", record)
+        signal = f"EXIT signal ({intent.reason})"
         if self.dry_run:
-            return
+            return f"{signal} -> dry run, nothing sent"
         if fill is not None:
             self._record_trade(pos, exit_time=bar_close, exit_price=fill.price, reason=intent.reason, fill_time=fill.time)
+            outcome = f"{signal} -> sold {fill.shares} @ {fill.price:.2f}"
         else:  # the stop or target got there first
             when, price, why = self._closing_info(pos, now)
             self._record_trade(pos, exit_time=pd.Timestamp(when), exit_price=price, reason=why)
+            outcome = f"{signal} -> nothing left to sell, already closed by the {why}"
         st.position = None
+        return outcome
 
     def _protect_or_flatten(self, pos: PositionState, ref: float, now: pd.Timestamp | None = None) -> None:
         """Rest the stop/target at IB. If that fails, sell the position at once and halt: never run unprotected."""
@@ -340,9 +375,27 @@ class Runner:
 
     def run(self, once: bool = False) -> None:
         with lock(self.dir):
-            self.start()
-            while True:
-                self.tick()
-                if once or self.state.halted:
-                    break
-                self.ib.sleep(POLL_SECONDS)
+            try:
+                self.start()
+                while True:
+                    self.tick()
+                    if once or self.state.halted:
+                        break
+                    self.ib.sleep(POLL_SECONDS)
+            except KeyboardInterrupt:
+                self._interrupted()
+
+    def _interrupted(self) -> None:
+        """Ctrl+C: write the state down and say what is still resting at IB. No traceback."""
+        if self.state is not None:
+            try:
+                self._save()
+            except Exception as e:  # never let the goodbye fail loudly
+                log.error("could not save the state on Ctrl+C: %s", e)
+        pos = self.state.position if self.state else None
+        log.warning("stopped by Ctrl+C")
+        say("Ctrl+C    : stopped. State saved.")
+        if pos is not None and not self.dry_run:
+            say(f"            Still {position_text(pos)}. Its stop/target stay resting at IB (good till cancelled) "
+                "and are checked again on the next start.")
+        say("            If an order was in flight, the next start's reconcile finds it and halts or repairs.")

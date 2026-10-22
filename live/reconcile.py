@@ -8,6 +8,7 @@ import logging
 from dataclasses import dataclass, field
 
 from .broker import Broker
+from .console import order_text, position_text
 from .state import LiveState
 
 log = logging.getLogger("live")
@@ -18,6 +19,8 @@ class ReconcileResult:
     actions: list[str] = field(default_factory=list)  # what was changed, for the log
     problems: list[str] = field(default_factory=list)  # what cannot be explained: halt
     needs_protection: bool = False  # long, but the stop/target pair is missing or broken: place a new one
+    state_text: str = ""  # what the state file said, for the console
+    ib_text: str = ""  # what IB said: position and open orders on the symbol
 
     @property
     def ok(self) -> bool:
@@ -55,6 +58,9 @@ def reconcile(ib, broker: Broker, state: LiveState) -> ReconcileResult:
     orders = open_orders(ib, state.symbol)
     ours = [t for t in orders if t.order.orderRef == broker.tag]
     foreign = [t for t in orders if t.order.orderRef != broker.tag]
+    res.state_text = position_text(state.position)
+    res.ib_text = (f"{shares} {state.symbol}; open orders: "
+                   + ("none" if not orders else "; ".join(order_text(t, broker.tag) for t in orders)))
 
     if foreign:
         res.problems.append(

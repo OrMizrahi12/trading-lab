@@ -23,6 +23,12 @@ def setup_logging(directory) -> None:
     for handler in (logging.StreamHandler(sys.stdout), logging.FileHandler(directory / "events.log")):
         handler.setFormatter(fmt)
         log.addHandler(handler)
+    # The operator's view: console only (the logger does not propagate, so events.log is unchanged).
+    console = logging.StreamHandler(sys.stdout)
+    console.setFormatter(logging.Formatter("%(asctime)s | %(message)s", datefmt="%H:%M:%S"))
+    console_log = logging.getLogger("live.console")
+    console_log.setLevel(logging.INFO)
+    console_log.addHandler(console)
 
 
 def main() -> None:
@@ -46,12 +52,17 @@ def main() -> None:
 
     settings = parse_settings(args.settings)
     setup_logging(run_dir(args.strategy, args.symbol, STATE_DIR))
-    ib = connect_paper()  # refuses a non-paper port, a remote host or any account not starting with DU
+    ib = None
     try:
+        ib = connect_paper()  # refuses a non-paper port, a remote host or any account not starting with DU
         Runner(ib, args.strategy, args.symbol, settings, dry_run=args.dry_run, catch_up=args.catch_up,
                flatten_on_mismatch=args.flatten_on_mismatch, clear_halt=args.clear_halt).run(once=args.once)
+    except KeyboardInterrupt:  # Ctrl+C while connecting; Runner.run handles it once running
+        print("\nCtrl+C: stopped before the engine started. Nothing was traded.")
+        sys.exit(130)
     finally:
-        ib.disconnect()
+        if ib is not None:
+            ib.disconnect()
 
 
 if __name__ == "__main__":
