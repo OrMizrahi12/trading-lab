@@ -67,6 +67,8 @@ class VwapTrend(Strategy):
 
         if not above.iloc[-1] or above.iloc[-2]:  # only on the bar price crosses above
             return None
+        if len(bars) <= p.atr_period:  # ATR needs a full window
+            return None
         atr = indicators.atr(high, low, close, p.atr_period).iloc[-1]
         if pd.isna(atr):
             return None

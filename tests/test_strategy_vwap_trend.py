@@ -77,3 +77,11 @@ def test_no_look_ahead():
     changed.iloc[k + 1 :, changed.columns.get_loc("close")] = 50.0
     s = VwapTrend()
     assert s.on_bar(bars.iloc[: k + 1], None) == s.on_bar(changed.iloc[: k + 1], None)
+
+
+def test_no_entry_before_atr_has_a_full_window():
+    # a cross on the 5th bar of the data (only 5 bars exist): ATR is not defined yet, so wait instead of crashing
+    today = [100.0, 100.0, 100.0, 99.0, 100.5] + [100.5] * 73
+    bars = two_days(YEST, today).iloc[78:83]
+    assert above(bars).to_numpy()[-1] and not above(bars).to_numpy()[-2]
+    assert VwapTrend().on_bar(bars, None) is None
