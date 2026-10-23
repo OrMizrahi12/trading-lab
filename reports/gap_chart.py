@@ -4,7 +4,7 @@ Pulls two sessions of regular-hours 5-minute bars from the IB Gateway (paper por
 draws the chosen session as candlesticks and a dashed line at the previous session's last
 close, so the opening gap (the jump between yesterday's close and today's open) is easy to see.
 Writes reports/<SYMBOL>_<DATE>_5min.html (gitignored) and prints its path.
-Run: uv run -m reports.gap_chart HXL 2026-10-22 [--port 4002] [--open]   (IB client ID 8)
+Run: uv run -m reports.gap_chart HXL 2026-10-22 [--port 4002] [--open]   (IB client ID 9)
 
 Paper research only. Nothing here places an order. A study chart, not a tip.
 """
@@ -19,7 +19,7 @@ import plotly.graph_objects as go
 
 NY = ZoneInfo("America/New_York")
 PAPER_PORTS = {7497, 4002}
-CLIENT_ID = 8
+CLIENT_ID = 9  # desk project holds 8, 20 and 30; see AGENTS.md
 ROOT = Path(__file__).resolve().parent.parent
 
 
