@@ -393,3 +393,123 @@ def test_report_points_at_the_daily_log_when_there_is_one(tmp_path):
     (log / "2026-10-23.log").write_text("x\n")
     text = report.build(res, CFG, tmp_path)
     assert "logs/2026-10-23.log" in text
+
+
+# -- the report's look at IB ----------------------------------------------------------------------------------------------
+
+class FakeIB:
+    """Just what report.fetch_ib uses. `orders` are (symbol, action, type, shares, stop, ref, done)."""
+
+    def __init__(self, orders=(), positions=()):
+        from types import SimpleNamespace as NS
+
+        self.trades = [NS(contract=NS(symbol=s), order=NS(action=a, orderType=t, totalQuantity=q, auxPrice=st, orderRef=ref),
+                          isDone=lambda d=done: d) for s, a, t, q, st, ref, done in orders]
+        self.pos = [NS(contract=NS(symbol=s), position=q) for s, q in positions]
+        self.asked, self.disconnected = None, False
+
+    def reqAllOpenOrders(self):
+        pass
+
+    def openTrades(self):
+        return self.trades
+
+    def positions(self):
+        return self.pos
+
+    def disconnect(self):
+        self.disconnected = True
+
+
+def ib_snapshot(orders=(), positions=()):
+    fake = FakeIB(orders, positions)
+    return report.fetch_ib(lambda **kw: fake), fake
+
+
+LEFT_STOP = ("QQQ", "SELL", "STP", 10.0, 705.58, "live:opening_range_breakout:QQQ:2026-10-23:1015", False)
+
+
+def flat_day(tmp_path):
+    return finished(tmp_path, {"halted": None, "position": None})
+
+
+def test_report_flags_a_stop_left_at_ib_after_the_state_file_says_flat(tmp_path):
+    """26 Oct 2026: the runner sold and its state was flat; a stop was still reported working at IB."""
+    ib, _ = ib_snapshot([LEFT_STOP])
+    text = report.build(flat_day(tmp_path), CFG, tmp_path, ib)
+    assert "Result: LEFT AT IB" in text and "SELL 10 QQQ STP stop 705.58" in text and "live.kill" in text
+    assert report.status(flat_day(tmp_path), CFG, tmp_path, ib)[0] == "LEFT AT IB"
+
+
+def test_report_flags_a_position_at_ib_that_the_state_file_does_not_show(tmp_path):
+    ib, _ = ib_snapshot(positions=[("QQQ", 10.0)])
+    assert "IB holds 10 QQQ" in report.build(flat_day(tmp_path), CFG, tmp_path, ib)
+    assert "Result: LEFT AT IB" in report.build(flat_day(tmp_path), CFG, tmp_path, ib)
+
+
+def test_report_clean_ib_is_ok_and_says_so(tmp_path):
+    ib, _ = ib_snapshot()
+    text = report.build(flat_day(tmp_path), CFG, tmp_path, ib)
+    assert "Result: OK" in text and "positions: none" in text and "open orders: 0" in text
+
+
+def test_report_ignores_the_desks_orders_and_finished_orders(tmp_path):
+    desk = ("SPY", "SELL", "STP", 5.0, 760.0, "live:desk:SPY:2026-10-23:1000", False)
+    other = ("AAPL", "SELL", "STP", 5.0, 200.0, "", False)
+    cancelled = ("QQQ", "SELL", "STP", 10.0, 705.58, "live:opening_range_breakout:QQQ:x", True)
+    ib, _ = ib_snapshot([desk, other, cancelled])
+    text = report.build(flat_day(tmp_path), CFG, tmp_path, ib)
+    assert "Result: OK" in text and "open orders: 2 (2 not ours" in text
+
+
+def test_report_still_flags_any_order_in_our_symbol_even_without_our_ref(tmp_path):
+    ib, _ = ib_snapshot([("QQQ", "SELL", "STP", 10.0, 700.0, "", False)])
+    assert "Result: LEFT AT IB" in report.build(flat_day(tmp_path), CFG, tmp_path, ib)
+
+
+def test_report_flags_our_order_in_another_symbol(tmp_path):
+    ib, _ = ib_snapshot([("IWM", "SELL", "STP", 10.0, 200.0, "live:opening_range_breakout:IWM:x", False)])
+    assert "Result: LEFT AT IB" in report.build(flat_day(tmp_path), CFG, tmp_path, ib)
+
+
+def test_report_says_not_checked_when_ib_cannot_be_asked(tmp_path):
+    def refuse(**kw):
+        raise ConnectionRefusedError("gateway down")
+
+    ib = report.check_ib(refuse)
+    text = report.build(flat_day(tmp_path), CFG, tmp_path, ib)
+    assert "ConnectionRefusedError" in ib and "Result: OK (IB not checked)" in text and "NOT CHECKED" in text
+
+
+def test_report_halt_and_not_flat_still_come_before_the_ib_result(tmp_path):
+    ib, _ = ib_snapshot([LEFT_STOP])
+    assert "Result: HALTED" in report.build(finished(tmp_path, {"halted": "boom", "position": None}), CFG, tmp_path, ib)
+    assert "Result: NOT FLAT" in report.build(finished(tmp_path, {"halted": None, "position": {"shares": 10, "closed_at": None}}),
+                                              CFG, tmp_path, ib)
+
+
+def test_report_ib_look_is_read_only_on_its_own_client_id_and_always_disconnects():
+    from live.config import CLIENT_ID, JOURNAL_CLIENT_ID, REPORT_CLIENT_ID
+
+    seen = {}
+    fake = FakeIB()
+
+    def connect(**kw):
+        seen.update(kw)
+        return fake
+
+    report.fetch_ib(connect)
+    assert seen == {"client_id": REPORT_CLIENT_ID, "readonly": True} and fake.disconnected
+    assert REPORT_CLIENT_ID not in {CLIENT_ID, JOURNAL_CLIENT_ID, 1, 2, 3, 4, 5, 8, 9, 10, 20, 30} and REPORT_CLIENT_ID < 20
+
+    class Boom(FakeIB):
+        def reqAllOpenOrders(self):
+            raise TimeoutError("x")
+
+    boom = Boom()
+    assert report.check_ib(lambda **kw: boom).startswith("TimeoutError") and boom.disconnected
+
+
+def test_report_without_ib_stays_offline(tmp_path):
+    text = report.build(flat_day(tmp_path), CFG, tmp_path)
+    assert "Result: OK" in text and "not asked (offline report)" in text

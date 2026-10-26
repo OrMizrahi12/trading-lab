@@ -6,6 +6,7 @@ from data_pipeline.config import HOST, PAPER_PORTS, PORT
 
 CLIENT_ID = 6  # Unique per Gateway connection (1-5 and 7 are taken, see AGENTS.md).
 JOURNAL_CLIENT_ID = 7  # live.journal_import, read-only
+REPORT_CLIENT_ID = 11  # scheduler.report's end-of-day look at IB, read-only
 
 if PORT not in PAPER_PORTS:
     raise RuntimeError(f"Refusing to connect: port {PORT} is not a paper port")

@@ -33,7 +33,7 @@ Hooks in .claude/hooks guard the paper-only rule.
 | 09:00 | prep: update the bar cache (`data_pipeline`), then the gap scanner |
 | 09:25 | start the live runner (`scheduler/schedule.yaml` says which strategy and symbol) |
 | close - 5 min (15:55; 12:55 on a half day) | the runner sells anything it holds |
-| close + 5 min (16:05; 13:05) | the runner is stopped (like Ctrl+C) and `data/live/reports/YYYY-MM-DD.md` is written |
+| close + 5 min (16:05; 13:05) | the runner is stopped (like Ctrl+C) and `data/live/reports/YYYY-MM-DD.md` is written, with a fresh read-only look at IB for leftover positions or orders (`LEFT AT IB`) |
 
 The scheduler never clears the STOP file (`data/live/STOP`, written by `uv run -m live.kill`): while it exists the runner is not started, and the report says so. A halted runner is not resumed either. Remove STOP yourself with `uv run -m live.kill --clear` when you are ready.
 

@@ -60,8 +60,9 @@ def dry_run_lines(plan, cfg, root=STATE_DIR) -> list[str]:
 
 def do_day(plan, cfg) -> None:
     result = run_day(plan, cfg)
-    path = report.write(result, cfg)
-    verdict, why = report.status(result, cfg)
+    ib = None if result.stop_blocked else report.check_ib()  # no runner ran, so there is nothing of ours to look for
+    path = report.write(result, cfg, ib=ib)
+    verdict, why = report.status(result, cfg, ib=ib)
     print(f"report: {path} ({verdict})")
 
 
