@@ -151,3 +151,44 @@ def test_server_has_no_write_methods(server):
                                        ("evil.com", False), ("127.0.0.1.evil.com", False), (None, False)])
 def test_host_check(header, ok):
     assert host_is_local(header) is ok
+
+
+# -- the status strip: files only, the desk's folder is read and never written -------------------------------------------
+
+def test_status_reads_lab_and_desk_files_and_survives_missing_ones(tmp_path):
+    from datetime import datetime, timezone
+
+    from dashboard import status
+
+    lab, desk = tmp_path / "lab", tmp_path / "desk"
+    eng = lab / "opening_range_breakout_QQQ"
+    eng.mkdir(parents=True)
+    (eng / "state.json").write_text(json.dumps({"halted": None, "position": None}))
+    (eng / "bar_delay.csv").write_text("poll_time,bar_start,bar_close,delay_seconds\nx,2026-10-26T13:45:00+00:00,y,1020\n")
+    (lab / "STOP").write_text("x")
+    (desk / "desk").mkdir(parents=True)
+    (desk / "desk" / "state.json").write_text(json.dumps({"halted": None, "open_trade": None, "last_bar_ts": "2026-10-26T13:45:00+00:00"}))
+    (desk / "desk" / "journal.jsonl").write_text(json.dumps({"bar": "b", "decision": {"action": "wait"}}) + "\n")
+    before = sorted(p.name for p in desk.rglob("*"))
+    out = status.load(lab, desk, datetime(2026, 10, 26, 14, 0, tzinfo=timezone.utc))
+    assert out["lab"]["engines"][0]["last_bar"]["delay_min"] == 17.0 and out["lab"]["stop_file"] is True
+    heartbeat, mcp = out["desk"][0], out["desk"][1]
+    assert heartbeat["last_bar_age_min"] == 15.0 and heartbeat["last_entry"]["action"] == "wait"
+    assert mcp["file"] is False  # missing file: shown, not an error
+    assert sorted(p.name for p in desk.rglob("*")) == before  # nothing created in the desk's folder
+
+
+def test_status_endpoint_serves_json_on_localhost_only(tmp_path):
+    server = make_server(tmp_path / "none.sqlite3", 0, lab_root=tmp_path, desk_root=tmp_path)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    try:
+        port = server.server_address[1]
+        body = json.load(urllib.request.urlopen(f"http://127.0.0.1:{port}/api/status"))
+        assert body["lab"]["engines"] == [] and len(body["desk"]) == 3
+        req = urllib.request.Request(f"http://127.0.0.1:{port}/api/status", headers={"Host": "evil.example"})
+        with pytest.raises(urllib.error.HTTPError) as err:
+            urllib.request.urlopen(req)
+        assert err.value.code == 403
+    finally:
+        server.shutdown()
+        server.server_close()

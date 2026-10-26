@@ -38,7 +38,7 @@ def make(tmp_path, script, now, *, bars=BARS, last_bar=None, position=None, hold
     ib.holdings["QQQ"] = holdings
     ib.market_price = 100.0
     clock = [at(now)]
-    feed = BarFeed(ib, None, clock=lambda: clock[0], fetch=lambda *a: bars)
+    feed = BarFeed(ib, None, clock=lambda: clock[0], fetch=lambda *a: bars, settle_min=0)
     runner = Runner(ib, "ema_trend", "QQQ", {}, strategy=Script(script), root=tmp_path, clock=lambda: clock[0],
                     feed=feed, dry_run=dry_run, **kw)
     if last_bar or position:

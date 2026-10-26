@@ -27,7 +27,7 @@ from .broker import Broker, PaperGuardError, check_paper, connect_paper
 from .config import STATE_DIR
 from .execution import CANCEL_WAIT_S, ExecutionHalt, Executor
 from .reconcile import ib_shares
-from .risk import OUR_PREFIX, stop_path
+from .risk import is_ours, stop_path
 from .state import PositionState
 
 log = logging.getLogger("live")
@@ -69,7 +69,7 @@ def _state_symbols(root: Path) -> set[str]:
 
 def _our_open(ib):
     ib.reqAllOpenOrders()
-    return [t for t in ib.openTrades() if t.order.orderRef.startswith(OUR_PREFIX)]
+    return [t for t in ib.openTrades() if is_ours(t.order.orderRef)]
 
 
 def kill(ib, *, root: Path = STATE_DIR, price, out=print, clock=lambda: pd.Timestamp.now(tz="UTC"),

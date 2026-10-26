@@ -96,7 +96,7 @@ def test_windows_and_intents_match_the_backtester(name, settings):
                 continue  # every call with a position or a decision, plus a sample of the quiet ones
             now = ts + pd.Timedelta(minutes=5 + delay_minutes)  # the moment this bar first becomes visible
             raw = bars.loc[now - pd.Timedelta(days=7) : now + pd.Timedelta(minutes=30)]  # IB also sends the forming bar
-            got = window(closed_bars(raw, now), ts)
+            got = window(closed_bars(raw, now, 0), ts)
             i = bars.index.get_loc(ts)
             pd.testing.assert_frame_equal(got, bars.iloc[max(0, i + 1 - 200) : i + 1])
             assert step(fresh, got, position_state(position)) == intent  # the engine only recorded legal intents

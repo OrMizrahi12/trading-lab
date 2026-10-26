@@ -65,6 +65,18 @@ def test_kill_twice_is_harmless(tmp_path):
     assert code == 0 and len(ib.placed) == placed and "nothing to cancel" in text
 
 
+def test_kill_never_touches_the_desks_orders_or_its_spy_position(tmp_path):
+    """The desk shares the account and its refs also start with "live:" (live:desk:, live:mcp:, live:open:)."""
+    ib = FakeIB()
+    ib.connect("127.0.0.1", 4002)
+    ib.market_price = 100.0
+    ib.holdings["SPY"] = 2  # the desk's share
+    for tag in ("live:desk:SPY", "live:mcp:SPY", "live:open:SPY"):
+        Broker(ib, tag).place(SPY, StopOrder("SELL", 2, 90.0, tif="GTC"), ref=f"{tag}:2026-03-02:1000")
+    code, text = run(ib, tmp_path)
+    assert ib.holdings["SPY"] == 2 and len(ib.openTrades()) == 3, text
+
+
 def test_kill_only_sells_symbols_that_are_ours(tmp_path):
     ib = world(tmp_path)
     ib.holdings["QQQ"] = 7  # someone's own holding: no order of ours, no state file

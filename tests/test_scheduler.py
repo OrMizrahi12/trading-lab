@@ -303,17 +303,27 @@ def test_dry_run_says_the_runner_would_start_without_stop(tmp_path):
 
 # -- an engines file instead of one pair ------------------------------------------------------------------------------------
 
-def engines_cfg(tmp_path=None):
-    return Config(engines="live/engines.yaml", max_restarts=3)
+TWO_PAIRS = """engines:
+  - {strategy: opening_range_breakout, symbol: QQQ, settings: {range_minutes: 15}}
+  - {strategy: donchian_breakout, symbol: SPY}
+"""
+
+
+def engines_cfg(tmp_path):
+    """A two-pair engines file of its own: the shipped live/engines.yaml has only QQQ (SPY belongs to the desk)."""
+    path = tmp_path / "two_pairs.yaml"
+    path.write_text(TWO_PAIRS)
+    return Config(engines=str(path), max_restarts=3)
 
 
 def test_config_may_point_at_an_engines_file(tmp_path):
+    engines = engines_cfg(tmp_path).engines
     path = tmp_path / "s.yaml"
-    path.write_text("engines: live/engines.yaml\nmax_restarts: 2\n")
+    path.write_text(f"engines: {engines}\nmax_restarts: 2\n")
     cfg = load_config(path)
     assert [p.symbol for p in cfg.pairs] == ["QQQ", "SPY"] and cfg.max_restarts == 2
     cmd = cfg.runner_cmd()
-    assert cmd[1:4] == ["-m", "live", "--config"] and cmd[4].endswith("live/engines.yaml")
+    assert cmd[1:4] == ["-m", "live", "--config"] and cmd[4].endswith("two_pairs.yaml")
     assert "--flatten-before-close-min" in cmd and "--strategy" not in cmd
 
 
@@ -336,7 +346,7 @@ def write_state(root, strategy, symbol, **state):
 def test_a_runner_is_not_restarted_only_when_every_pair_is_halted(tmp_path):
     from scheduler.jobs import _halted
 
-    cfg = engines_cfg()
+    cfg = engines_cfg(tmp_path)
     write_state(tmp_path, "opening_range_breakout", "QQQ", halted="boom")
     assert _halted(tmp_path, cfg) is None  # SPY is fine: the process may be restarted for it
     write_state(tmp_path, "donchian_breakout", "SPY", halted="bang")
@@ -349,7 +359,7 @@ def test_report_covers_every_pair_and_a_halt_or_open_position_in_any_of_them(tmp
     plan = plan_for(date(2026, 10, 23))
     res = DayResult(plan)
     res.jobs = [JobRecord("runner", plan.runner, plan.runner, plan.stop, "stopped at the stop time")]
-    cfg = engines_cfg()
+    cfg = engines_cfg(tmp_path)
     write_state(tmp_path, "opening_range_breakout", "QQQ")
     write_state(tmp_path, "donchian_breakout", "SPY")
     text = report.build(res, cfg, tmp_path)

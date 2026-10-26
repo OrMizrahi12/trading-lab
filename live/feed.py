@@ -16,7 +16,7 @@ import pandas as pd
 from data_pipeline.downloader import fetch_chunk
 from market_data import hist_throttle
 
-from .config import BAR_MINUTES, LOOKBACK_BARS, MAX_BAR_DELAY_MIN
+from .config import BAR_MINUTES, LOOKBACK_BARS, MAX_BAR_DELAY_MIN, SETTLE_MIN
 
 log = logging.getLogger("live")
 
@@ -29,12 +29,16 @@ def utc_now() -> pd.Timestamp:
     return pd.Timestamp.now(tz="UTC")
 
 
-def closed_bars(raw: pd.DataFrame, now: pd.Timestamp) -> pd.DataFrame:
-    """Sorted, de-duplicated bars whose 5 minutes are over at `now` (the forming bar is dropped)."""
+def closed_bars(raw: pd.DataFrame, now: pd.Timestamp, settle_min: float = SETTLE_MIN) -> pd.DataFrame:
+    """Sorted, de-duplicated bars that are final at `now`: their 5 minutes ended at least `settle_min` ago.
+
+    With delayed data a bar the wall clock calls over can still be filling at IB (partial volume and prices), so the
+    forming bar and the not yet settled newest bar are both dropped. `settle_min=0` is the plain wall-clock rule.
+    """
     if raw.empty:
         return raw
     bars = raw[~raw.index.duplicated(keep="last")].sort_index()
-    return bars[bars.index + BAR <= now]
+    return bars[bars.index + BAR + pd.Timedelta(minutes=settle_min) <= now]
 
 
 def find_holes(closed: pd.DataFrame, lookback: int = LOOKBACK_BARS, calendar=None) -> list[pd.Timestamp]:
@@ -55,7 +59,9 @@ def find_holes(closed: pd.DataFrame, lookback: int = LOOKBACK_BARS, calendar=Non
 
 class BarFeed:
     def __init__(self, ib, contract, *, delay_log: Path | None = None, clock=utc_now, throttle=hist_throttle,
-                 max_delay_min: int = MAX_BAR_DELAY_MIN, fetch=fetch_chunk, lookback: int = LOOKBACK_BARS):
+                 max_delay_min: int = MAX_BAR_DELAY_MIN, fetch=fetch_chunk, lookback: int = LOOKBACK_BARS,
+                 settle_min: float = SETTLE_MIN):
+        self.settle_min = settle_min
         self.ib, self.contract = ib, contract
         self.delay_log, self.clock, self.throttle, self.fetch = delay_log, clock, throttle, fetch
         self.max_delay = pd.Timedelta(minutes=max_delay_min)
@@ -67,7 +73,7 @@ class BarFeed:
         """One request. Returns all closed bars IB sent (about a week), oldest first."""
         now = self.clock()
         raw = self.fetch(self.ib, self.contract, now, "5min", self.throttle)
-        closed = closed_bars(raw, now)
+        closed = closed_bars(raw, now, self.settle_min)
         self._log_delays(closed, now)
         self.holes = find_holes(closed, self.lookback)
         if self.holes:

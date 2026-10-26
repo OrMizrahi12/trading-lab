@@ -37,7 +37,8 @@ def replay(name, settings, bars, delay_minutes, root):
         raw = bars.iloc[max(0, ib.i - 700) : ib.i + (2 if delay_minutes == 0 else 1)]
         return raw[raw.index >= end - pd.Timedelta(days=7)]
 
-    feed = BarFeed(ib, None, clock=lambda: now[0], fetch=fetch)
+    feed = BarFeed(ib, None, clock=lambda: now[0], fetch=fetch,
+                   **({"settle_min": 0} if delay_minutes == 0 else {}))  # real-time data needs no settling; the lag case uses the default
     runner = Runner(ib, name, "QQQ", settings, strategy=rec, root=root, clock=lambda: now[0], feed=feed,
                     wall_clock_rules=False)
     runner.start()

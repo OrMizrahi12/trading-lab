@@ -35,6 +35,7 @@
   <h1>Paper engine dashboard</h1>
   <div class="sub">Paper trading only, read-only view of the trade journal. <span id="updated"></span></div>
 
+  <div class="card"><h2>Everything running (files only)</h2><div class="scroll" id="status"></div></div>
   <div class="card"><div class="stats" id="stats"></div><div class="note" id="statsnote"></div></div>
   <div class="card"><h2>Account equity</h2><div id="chart"></div></div>
   <div class="card"><h2>Open positions</h2><div class="scroll" id="positions"></div></div>
@@ -119,7 +120,25 @@ async function refresh() {
     {h:"Entry ref", f:r => r.entry_ref, left:true}], d.trades, "No closed trades yet.");
   $("updated").textContent = "Updated " + new Date().toLocaleTimeString() + " (refreshes every 30 s). * commission not yet reported.";
 }
+async function refreshStatus() {
+  let d;
+  try { d = await (await fetch("/api/status")).json(); } catch (e) { return; }
+  if (d.error) return;
+  const rows = d.lab.engines.map(e => ({name: "lab " + e.name + " (client 6)",
+    state: e.halted ? "HALTED: " + e.halted : (e.position ? "holds a position" : "flat, running or stopped"),
+    bar: e.last_bar ? e.last_bar.bar_start + " (seen " + e.last_bar.delay_min + " min after close)" : "no bar yet"}));
+  d.desk.forEach(p => rows.push({name: "desk " + p.name,
+    state: !p.file ? "no file" : (p.halted ? "HALTED: " + p.halted : (p.open_trade ? "open trade" : "flat")),
+    bar: (p.last_bar ? p.last_bar + " (" + p.last_bar_age_min + " min ago)" : "no bar yet") +
+      (p.last_entry && p.last_entry.action ? ", last: " + p.last_entry.action : "")}));
+  table($("status"), [{h:"Component", f:r => r.name, left:true}, {h:"State", f:r => r.state, left:true}, {h:"Newest bar", f:r => r.bar, left:true}],
+    rows, "Nothing found.");
+  const note = el("div", (d.lab.stop_file ? "STOP FILE PRESENT: buys refused. " : "") + "Risk refusals today: " + d.lab.risk_refusals_today + ".", "note");
+  $("status").append(note);
+}
 refresh();
+refreshStatus();
+setInterval(refreshStatus, 30000);
 setInterval(refresh, 30000);
 </script>
 </body>

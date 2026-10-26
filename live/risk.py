@@ -25,6 +25,14 @@ log = logging.getLogger("live")
 
 DEFAULT_LIMITS = Path(__file__).parent / "risk_limits.yaml"
 OUR_PREFIX = "live:"  # every order we send carries an orderRef that starts with this
+# The desk project (~/trading-desk) shares this paper account and also starts its refs with "live:". Its orders are
+# never ours: the kill switch must not cancel them, and its buys must not count against our trade limit.
+DESK_PREFIXES = ("live:desk:", "live:mcp:", "live:open:")
+
+
+def is_ours(ref: str | None) -> bool:
+    ref = ref or ""
+    return ref.startswith(OUR_PREFIX) and not ref.startswith(DESK_PREFIXES)
 
 
 class RiskRefused(RuntimeError):
@@ -116,9 +124,9 @@ class Risk:
     def _entries_today(self, ib) -> int:
         """Distinct entry refs of ours that bought today or are still buying (IB's executions and open orders)."""
         refs = {f.execution.orderRef for f in ib.reqExecutions()
-                if f.execution.side == "BOT" and f.execution.orderRef.startswith(OUR_PREFIX)}
+                if f.execution.side == "BOT" and is_ours(f.execution.orderRef)}
         refs |= {t.order.orderRef for t in ib.openTrades()
-                 if t.order.action == "BUY" and t.order.orderRef.startswith(OUR_PREFIX)}
+                 if t.order.action == "BUY" and is_ours(t.order.orderRef)}
         return len(refs)
 
     def _day_start_equity(self, ib) -> float:

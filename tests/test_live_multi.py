@@ -37,7 +37,7 @@ def world(tmp_path, scripts=None, *, now=f"{DAY1} 10:12", limits=LIMITS, reconne
     alerter = Alerter(TOPIC, post=capture, background=False) if capture else None
     link, runners = Link(), []
     for p in pairs:
-        feed = BarFeed(ib, None, clock=lambda: clock[0], fetch=lambda *a: BARS)
+        feed = BarFeed(ib, None, clock=lambda: clock[0], fetch=lambda *a: BARS, settle_min=0)
         r = Runner(ib, p.strategy, p.symbol, {}, strategy=Script((scripts or {}).get(p.symbol, {})), root=tmp_path,
                    clock=lambda: clock[0], feed=feed, risk=risk, alerter=alerter, link=link, reconnect=reconnect,
                    reconnect_wait_s=0)
@@ -208,7 +208,7 @@ def write(tmp_path, text):
 
 def test_the_shipped_engines_file_loads_and_every_symbol_has_limits():
     pairs = load_pairs(risk=Risk.from_file())
-    assert [(p.strategy, p.symbol) for p in pairs] == [("opening_range_breakout", "QQQ"), ("donchian_breakout", "SPY")]
+    assert [(p.strategy, p.symbol) for p in pairs] == [("opening_range_breakout", "QQQ")]  # no SPY: the desk's forward test owns it
     assert pairs[0].settings == {"range_minutes": 15}
 
 

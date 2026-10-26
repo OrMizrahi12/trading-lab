@@ -155,7 +155,7 @@ def test_a_real_sigint_ends_the_process_with_no_traceback(tmp_path):
         bars = day_bars(DAY1, [100.0] * 78, 100.0)
         now = at(DAY1 + " 10:12")
         runner = Runner(ib, "ema_trend", "QQQ", {{}}, strategy=Script({{}}), root=__import__("pathlib").Path({str(tmp_path)!r}),
-                        clock=lambda: now, feed=BarFeed(ib, None, clock=lambda: now, fetch=lambda *a: bars))
+                        clock=lambda: now, feed=BarFeed(ib, None, clock=lambda: now, fetch=lambda *a: bars, settle_min=0))
         setup_logging(runner.dir)
         print("READY", flush=True)
         runner.run()

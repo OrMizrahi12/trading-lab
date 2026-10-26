@@ -21,6 +21,12 @@ POLL_SECONDS = 60
 LOOKBACK_BARS = 200  # same window the backtester hands to on_bar (backtests/engine.py)
 HISTORY_DURATION = "5 D"  # enough 5-minute bars to fill LOOKBACK_BARS across sessions
 
+# The paper account's market data is delayed by 15 minutes, so IB's newest bar is still being filled when the wall clock
+# says it is over. The desk measured it (a bar seen 12 minutes after its close held 21% of its final volume, complete only
+# from about 15 minutes): a bar is final once its end is DATA_DELAY_MIN + SETTLE_MARGIN_MIN old. 0 would suit real-time data.
+DATA_DELAY_MIN = 15.0
+SETTLE_MARGIN_MIN = 1.0
+SETTLE_MIN = DATA_DELAY_MIN + SETTLE_MARGIN_MIN
 MAX_BAR_DELAY_MIN = 30  # a closed bar older than this when we see it gets a warning
 MAX_SIGNAL_AGE_MIN = 30  # signals older than this are logged and skipped, never traded
 FLATTEN_BEFORE_CLOSE_MIN = 10  # wall-clock flatten deadline; the delayed bars arrive too late for the strategies' own

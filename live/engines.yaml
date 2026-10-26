@@ -1,9 +1,8 @@
 # Several strategies in one process: `uv run -m live --config live/engines.yaml`
 # One engine per symbol (IB keeps one position per symbol). Every symbol needs limits in risk_limits.yaml.
 # Quote times in settings ("11:30"); unquoted, YAML reads them as a number.
+# No SPY engine: SPY belongs to the desk's forward test (client 8), nothing else may trade it.
 engines:
   - strategy: opening_range_breakout
     symbol: QQQ
     settings: {range_minutes: 15}
-  - strategy: donchian_breakout
-    symbol: SPY

@@ -23,6 +23,7 @@ class Clock:
 
 
 def make_feed(bars, clock, tmp_path, **kw):
+    kw.setdefault("settle_min", 0)  # these tests are about the wall-clock rule; the settle rule has its own tests below
     state = {"bars": bars}
     feed = BarFeed(None, None, delay_log=tmp_path / "delay.csv", clock=clock,
                    fetch=lambda ib, c, end, size, thr: state["bars"], **kw)
@@ -32,9 +33,9 @@ def make_feed(bars, clock, tmp_path, **kw):
 def test_forming_bar_is_dropped_and_duplicates_collapse():
     bars = day_bars(DAY1, [100 + i for i in range(6)], 100)  # 09:30 .. 09:55
     dup = pd.concat([bars, bars.iloc[[3]]])
-    out = closed_bars(dup, ts(f"{DAY1} 09:58"))  # the 09:55 bar closes at 10:00: still forming
+    out = closed_bars(dup, ts(f"{DAY1} 09:58"), 0)  # the 09:55 bar closes at 10:00: still forming
     assert list(out.index) == list(bars.index[:5])
-    assert closed_bars(dup, ts(f"{DAY1} 10:00")).index[-1] == bars.index[-1]  # closed exactly at 10:00
+    assert closed_bars(dup, ts(f"{DAY1} 10:00"), 0).index[-1] == bars.index[-1]  # closed exactly at 10:00
 
 
 def test_empty_raw_is_fine():
@@ -95,3 +96,22 @@ def test_hole_outside_the_lookback_window_is_ignored():
     bars = day_bars(DAY1, [100] * 78, 100)
     gapped = bars.drop(bars.index[2])
     assert find_holes(gapped, lookback=20) == []
+
+
+def test_a_bar_the_clock_calls_over_but_ibs_delayed_feed_may_still_fill_is_not_final():
+    """Delayed data: IB's newest bar is partial for ~15 minutes after its close (the desk measured it)."""
+    bars = day_bars(DAY1, [100 + i for i in range(6)], 100)  # 09:30 .. 09:55 starts
+    last = bars.index[-1]  # 09:55 bar, ends 10:00
+    assert closed_bars(bars, last + pd.Timedelta(minutes=5 + 16)).index[-1] == last  # ended 16 minutes ago
+    assert closed_bars(bars, ts(f"{DAY1} 10:10")).index[-1] != last  # 10 min after its end: still unsettled
+    assert closed_bars(bars, ts(f"{DAY1} 10:15")).index[-1] != last  # exactly 15: not yet (1 minute margin)
+    assert closed_bars(bars, ts(f"{DAY1} 10:16")).index[-1] == last  # 16 minutes after its end: final
+
+
+def test_feed_returns_the_partial_newest_bar_only_after_it_settles(tmp_path):
+    bars = day_bars(DAY1, [100 + i for i in range(6)], 100)
+    clock = Clock(ts(f"{DAY1} 10:12"))
+    feed, _ = make_feed(bars, clock, tmp_path, settle_min=16)
+    assert feed.poll().index[-1] == bars.index[-2]  # 09:55 ended at 10:00, only 12 minutes ago: partial; 09:50 is settled
+    clock.now = ts(f"{DAY1} 10:16")
+    assert feed.poll().index[-1] == bars.index[-1]

@@ -213,3 +213,10 @@ def test_a_runner_with_limits_enters_small(tmp_path):
     runner.start()
     runner.tick()
     assert runner.state.position.shares == 10  # 1% risk on a million dollars would have been 6,000+
+
+
+def test_the_desks_buys_do_not_count_against_our_trade_limit(tmp_path):
+    from live.risk import is_ours
+
+    assert is_ours("live:opening_range_breakout:QQQ:2026-10-26:0945") and is_ours("live:kill")
+    assert not any(is_ours(r) for r in ("live:desk:SPY:2026-10-26:0945", "live:mcp:SPY", "live:open:XYZ", "by-hand", "", None))
