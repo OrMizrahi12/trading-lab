@@ -154,6 +154,18 @@ def test_no_new_entry_after_the_flatten_deadline(tmp_path):
     assert ib.placed == [] and "deadline" in lines(runner, "signals.jsonl")[0]["action"]
 
 
+def test_no_order_of_any_kind_for_signals_on_the_last_bars_seen_after_the_close(tmp_path):
+    """Delayed bars: the 15:50 and 15:55 bars are first seen after 16:00. Fresh enough to pass the age rule (30 min),
+    but the market is shut, so nothing may be sent (this is what keeps an after-hours engine from ordering)."""
+    ib, runner, _ = make(tmp_path, {"15:50": ENTRY, "15:55": ENTRY}, f"{DAY1} 16:20", last_bar="15:45",
+                         max_signal_age_min=60)
+    runner.start()
+    runner.tick()
+    assert ib.placed == [] and ib.openTrades() == []
+    acts = [x["action"] for x in lines(runner, "signals.jsonl")]
+    assert len(acts) == 2 and all("market closed or past the flatten deadline" in a for a in acts)
+
+
 def test_unexplained_position_halts_and_the_halt_survives_a_restart_until_cleared(tmp_path):
     ib, runner, _ = make(tmp_path, {"10:05": ENTRY}, f"{DAY1} 10:12", last_bar="10:00", holdings=7)
     runner.start()
