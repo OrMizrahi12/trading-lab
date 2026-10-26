@@ -4,4 +4,3 @@ strategy: opening_range_breakout
 symbol: QQQ
 settings: {range_minutes: 15}   # passed as --set name=value
 max_restarts: 3                 # restarts of a runner that died before the flatten time (never after a halt or STOP)
-scanner: false                  # today the desk's open-window agent runs the gap scan (13:50 UTC); prep updates the bar cache only
