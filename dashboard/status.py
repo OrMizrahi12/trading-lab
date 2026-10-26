@@ -52,9 +52,11 @@ def _last_delay(path: Path) -> dict | None:
     return {"bar_start": row[1], "delay_min": round(float(row[3]) / 60, 1)} if len(row) == 4 else None
 
 
-def lab(root: Path, now: datetime) -> dict:
+def lab(root: Path, now: datetime, hide: frozenset = frozenset()) -> dict:
     engines = []
     for state_file in sorted(Path(root).glob("*/state.json")):
+        if state_file.parent.name in hide:  # an old run the page should not show (its files stay untouched)
+            continue
         state = _json(state_file) or {}
         engines.append({"name": state_file.parent.name, "halted": state.get("halted"),
                         "position": state.get("position"), "last_bar": _last_delay(state_file.parent / "bar_delay.csv")})
@@ -88,6 +90,7 @@ def desk(root: Path, now: datetime) -> list[dict]:
     return out
 
 
-def load(lab_root: Path = LAB_ROOT, desk_root: Path = DESK_ROOT, now: datetime | None = None) -> dict:
+def load(lab_root: Path = LAB_ROOT, desk_root: Path = DESK_ROOT, now: datetime | None = None,
+         hide: frozenset = frozenset()) -> dict:
     now = now or datetime.now(timezone.utc)
-    return {"as_of": now.isoformat(), "lab": lab(lab_root, now), "desk": desk(desk_root, now)}
+    return {"as_of": now.isoformat(), "lab": lab(lab_root, now, hide), "desk": desk(desk_root, now)}

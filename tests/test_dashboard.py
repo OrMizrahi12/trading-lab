@@ -192,3 +192,14 @@ def test_status_endpoint_serves_json_on_localhost_only(tmp_path):
     finally:
         server.shutdown()
         server.server_close()
+
+
+def test_status_can_hide_an_old_engine_folder_without_touching_it(tmp_path):
+    from dashboard import status
+
+    for name in ("opening_range_breakout_QQQ", "opening_range_breakout_SPY"):
+        (tmp_path / name).mkdir()
+        (tmp_path / name / "state.json").write_text(json.dumps({"halted": "old" if name.endswith("SPY") else None}))
+    shown = status.load(tmp_path, tmp_path / "desk", hide=frozenset({"opening_range_breakout_SPY"}))
+    assert [e["name"] for e in shown["lab"]["engines"]] == ["opening_range_breakout_QQQ"]
+    assert (tmp_path / "opening_range_breakout_SPY" / "state.json").exists()

@@ -12,8 +12,9 @@ def main() -> None:
     p.add_argument("--port", type=int, default=PORT)
     p.add_argument("--db", type=Path, default=data.DEFAULT_DB, help="journal file (default data/live/journal.sqlite3)")
     p.add_argument("--desk-data", type=Path, default=status.DESK_ROOT, help="the desk's data folder, read-only (default ~/trading-desk/data)")
+    p.add_argument("--hide-engine", action="append", default=[], metavar="FOLDER", help="hide an old engine folder from the status card (repeatable)")
     args = p.parse_args()
-    server = make_server(args.db, args.port, desk_root=args.desk_data)
+    server = make_server(args.db, args.port, desk_root=args.desk_data, hide=frozenset(args.hide_engine))
     print(f"Dashboard on http://127.0.0.1:{server.server_address[1]}  (read-only, Ctrl+C to stop)", flush=True)
     try:
         server.serve_forever()

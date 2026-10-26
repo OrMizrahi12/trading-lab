@@ -31,6 +31,7 @@ class Handler(BaseHTTPRequestHandler):
     db_path: Path = data.DEFAULT_DB
     lab_root: Path = status.LAB_ROOT
     desk_root: Path = status.DESK_ROOT
+    hide: frozenset = frozenset()
 
     def _send(self, code: int, body: bytes, ctype: str) -> None:
         self.send_response(code)
@@ -57,7 +58,7 @@ class Handler(BaseHTTPRequestHandler):
             self._send(200, body, "application/json")
         elif path == "/api/status":
             try:
-                body = json.dumps(status.load(self.lab_root, self.desk_root)).encode()
+                body = json.dumps(status.load(self.lab_root, self.desk_root, hide=self.hide)).encode()
             except Exception:
                 log.exception("reading the status files failed")
                 return self._send(500, b'{"error": "could not read the status files"}', "application/json")
@@ -70,7 +71,7 @@ class Handler(BaseHTTPRequestHandler):
 
 
 def make_server(db_path: Path = data.DEFAULT_DB, port: int = PORT, lab_root: Path = status.LAB_ROOT,
-                desk_root: Path = status.DESK_ROOT) -> ThreadingHTTPServer:
+                desk_root: Path = status.DESK_ROOT, hide: frozenset = frozenset()) -> ThreadingHTTPServer:
     """A server bound to 127.0.0.1 only (never 0.0.0.0). Port 0 picks a free one."""
-    handler = type("BoundHandler", (Handler,), {"db_path": Path(db_path), "lab_root": Path(lab_root), "desk_root": Path(desk_root)})
+    handler = type("BoundHandler", (Handler,), {"db_path": Path(db_path), "lab_root": Path(lab_root), "desk_root": Path(desk_root), "hide": frozenset(hide)})
     return ThreadingHTTPServer((HOST, port), handler)
