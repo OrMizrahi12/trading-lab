@@ -46,6 +46,7 @@ class Config:
     settings: dict = field(default_factory=dict)
     max_restarts: int = 3
     engines: str | None = None
+    scanner: bool = True  # False: prep updates the bar cache only (today the desk's open-window agent runs the scan)
 
     @property
     def pairs(self) -> list[Pair]:
@@ -65,13 +66,13 @@ class Config:
 
 def load_config(path: Path = CONFIG) -> Config:
     raw = yaml.safe_load(path.read_text()) or {}
-    unknown = set(raw) - {"strategy", "symbol", "settings", "max_restarts", "engines"}
+    unknown = set(raw) - {"strategy", "symbol", "settings", "max_restarts", "engines", "scanner"}
     single = bool(raw.get("strategy") and raw.get("symbol"))
     if unknown or single == bool(raw.get("engines")) or (raw.get("engines") and raw.get("settings")):
         raise ValueError(f"{path}: needs either strategy and symbol (with optional settings) or engines: <engines file>, "
                          f"plus optional max_restarts (got {sorted(raw)})")
     cfg = Config(raw.get("strategy"), raw.get("symbol"), raw.get("settings") or {}, int(raw.get("max_restarts", 3)),
-                 raw.get("engines"))
+                 raw.get("engines"), bool(raw.get("scanner", True)))
     cfg.pairs  # fail now, not at 09:25, if the engines file is bad
     return cfg
 
@@ -240,8 +241,10 @@ def run_day(plan: DayPlan, cfg: Config, io=None, root: Path = STATE_DIR, out=pri
         prep.result = "skipped: started after the runner time"
     else:
         _sleep_until(io, plan.prep)
-        say("prep: updating the bar cache, then the gap scanner")
-        steps = [("data_pipeline", [sys.executable, "-m", "data_pipeline"]), ("scanner", [sys.executable, "scanner.py"])]
+        say("prep: updating the bar cache" + (", then the gap scanner" if cfg.scanner else ""))
+        steps = [("data_pipeline", [sys.executable, "-m", "data_pipeline"])]
+        if cfg.scanner:
+            steps.append(("scanner", [sys.executable, "scanner.py"]))
         results = []
         for name, cmd in steps:
             sub = JobRecord(f"prep:{name}", plan.prep)

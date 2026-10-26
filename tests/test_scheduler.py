@@ -109,6 +109,17 @@ def commands(io):
     return [" ".join(c[1:]) for _, c in io.spawned]
 
 
+def test_scanner_false_updates_the_cache_only(tmp_path):
+    import dataclasses
+
+    plan = plan_for(date(2026, 10, 23))
+    io = FakeIo(ny("2026-10-23 08:50"))
+    io.runners = [Proc(io)]
+    res = run_day(plan, dataclasses.replace(CFG, scanner=False), io, root=tmp_path, out=lambda m: None)
+    assert commands(io)[0] == "-m data_pipeline" and "scanner.py" not in commands(io)
+    assert "scanner" not in res.jobs[0].result
+
+
 def test_whole_day_runs_prep_runner_and_stops_it(tmp_path):
     plan = plan_for(date(2026, 10, 23))
     io = FakeIo(ny("2026-10-23 08:50"))
