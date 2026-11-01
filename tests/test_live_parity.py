@@ -71,7 +71,7 @@ def test_live_path_makes_the_backtests_decisions(name, settings, delay, tmp_path
     assert first_difference(live.calls, engine.calls) is None  # bar, position shown, decision: all of it
     assert live.signals() == engine.signals()
 
-    # Bonus: the trades the runner logged are the backtester's trades (times and prices; share counts differ,
+    # Extra check: the trades the runner logged are the backtester's trades (times and prices; share counts differ,
     # the runner sizes on the signal bar's close while the backtester sizes on the next open).
     logged = [json.loads(line) for line in (runner.dir / "trades.jsonl").read_text().splitlines()]
     expected = result.trades[result.trades["reason"] != "end_of_data"]
